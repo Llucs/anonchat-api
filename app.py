@@ -8,7 +8,7 @@ from engine.session import ChatGPT
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger('anonchat')
 
-_seen_models = set()
+_known_models = set()
 _global_rate_limits = None
 
 try:
@@ -68,11 +68,13 @@ if _has_server:
         try:
             client = ChatGPT(proxy=req.proxy) if req.proxy else ChatGPT()
             image = req.image
+            requested_model = None if req.model == 'auto' else req.model
             result = client.converse(
                 message=last,
                 image=image if (image and image.startswith('data:image') or (image and not image.startswith('http'))) else None,
                 conversation_id=req.conversation_id,
                 parent_message_id=req.parent_message_id,
+                model=requested_model,
             )
         except SystemExit:
             raise HTTPException(502, 'IP flagged by ChatGPT')
@@ -82,7 +84,10 @@ if _has_server:
 
         model = result['model'] or req.model
         if model:
-            _seen_models.add(model)
+            _known_models.add(model)
+        if result.get('model_limits'):
+            for m in result['model_limits']:
+                _known_models.add(m)
 
         global _global_rate_limits
         if result.get('rate_limits'):
@@ -156,12 +161,22 @@ if _has_server:
         return {'status': 'ok'}
 
     @app.get('/v1/models')
-    async def list_models():
-        models = [{'id': 'auto', 'object': 'model', 'created': 1700000000, 'owned_by': 'openai'}]
-        for m in sorted(_seen_models):
+    async def list_models(refresh: bool = False):
+        if refresh:
+            try:
+                client = ChatGPT()
+                result = client.converse('hi', model='auto')
+                slug = result.get('model')
+                if slug and slug != 'auto':
+                    _known_models.add(slug)
+            except Exception as e:
+                logger.warning(f'model discovery failed: {e}')
+
+        all_models = [{'id': 'auto', 'object': 'model', 'created': 1700000000, 'owned_by': 'openai'}]
+        for m in sorted(_known_models):
             if m != 'auto':
-                models.append({'id': m, 'object': 'model', 'created': 1700000000, 'owned_by': 'openai'})
-        return {'object': 'list', 'data': models}
+                all_models.append({'id': m, 'object': 'model', 'created': 1700000000, 'owned_by': 'openai'})
+        return {'object': 'list', 'data': all_models}
 
     @app.get('/v1/usage')
     async def usage():
@@ -172,7 +187,12 @@ if _has_server:
 
 if __name__ == '__main__':
     if _has_server:
-        run(app, host='0.0.0.0', port=8000, log_level='info')
+        import sys as _sys
+        _port = 8000
+        for _i, _a in enumerate(_sys.argv):
+            if _a == '--port' and _i + 1 < len(_sys.argv):
+                _port = int(_sys.argv[_i + 1])
+        run(app, host='0.0.0.0', port=_port, log_level='info')
     else:
         print('Server deps not installed. Install: pip install fastapi uvicorn pydantic')
         print('Or use CLI: anonchat "message"')

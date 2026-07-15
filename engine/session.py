@@ -47,6 +47,7 @@ class ChatGPT(_BaseChatGPT):
         self.turn_use_case = None
         self.server_ttfvt_ms = None
         self._turn_index = 2000
+        self._requested_model = 'auto'
 
     def _reset_meta(self):
         self.model_slug = None
@@ -145,17 +146,29 @@ class ChatGPT(_BaseChatGPT):
         return _clean_markers(''.join(parts))
 
     def converse(self, message: str, image: str = None,
-                 conversation_id: str = None, parent_message_id: str = None) -> dict:
+                 conversation_id: str = None, parent_message_id: str = None,
+                 model: str = None) -> dict:
         self._reset_meta()
         self.resume_token = None
         self.rate_limits = None
+        self._requested_model = model or 'auto'
 
-        if image:
-            self.start_with_image(message, image)
-        elif conversation_id and parent_message_id:
-            self._send_followup(message, conversation_id, parent_message_id)
-        else:
-            self.ask_question(message)
+        original_post = self.session.post
+        def _patched_post(url, **kwargs):
+            if 'json' in kwargs and 'model' in kwargs['json']:
+                kwargs['json']['model'] = self._requested_model
+            return original_post(url, **kwargs)
+        self.session.post = _patched_post
+
+        try:
+            if image:
+                self.start_with_image(message, image)
+            elif conversation_id and parent_message_id:
+                self._send_followup(message, conversation_id, parent_message_id)
+            else:
+                self.ask_question(message)
+        finally:
+            self.session.post = original_post
 
         conv_id = self.data.get('conversation_id') or self.conversation_id
         parent_id = self.data.get('parent_message_id') or self.parent_message_id
