@@ -270,7 +270,7 @@ class Decompiler:
         
         if len(args) == 4:
             target = str(args[3]).replace(".", "_")
-            count = len(re.findall(target, Decompiler.decompiled))
+            count = len(re.findall(re.escape(target), Decompiler.decompiled))
             if count <= 1 and f"var var_{str(args[2]).replace('.', '_')}" not in Decompiler.decompiled:
                 if not Decompiler.xorkey:
                     Decompiler.xorkey = str(args[3])

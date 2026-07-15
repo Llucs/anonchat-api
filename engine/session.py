@@ -1,12 +1,20 @@
 from json import loads as _loads
 from typing import Generator, Optional
+import re
 
 from wrapper import ChatGPT as _BaseChatGPT
 
+_RICH_BLOCK_RE = re.compile(r':::(\w+)\{.*?\}(.*?):::', re.DOTALL)
+
+def _clean_rich_blocks(text):
+    if not text:
+        return text
+    return _RICH_BLOCK_RE.sub(r'\2', text)
 
 def _clean_markers(text):
     if not text:
         return text
+    text = _clean_rich_blocks(text)
     while '\ue200' in text:
         start = text.index('\ue200')
         try:
@@ -255,7 +263,9 @@ class ChatGPT(_BaseChatGPT):
 
         try:
             for chunk in self.start_conversation_stream(message):
-                yield {'type': 'chunk', 'text': chunk}
+                cleaned = _clean_rich_blocks(chunk)
+                if cleaned:
+                    yield {'type': 'chunk', 'text': cleaned}
         except SystemExit:
             yield {'type': 'error', 'error': 'IP flagged by ChatGPT'}
             return
