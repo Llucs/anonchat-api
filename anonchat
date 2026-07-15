@@ -1,71 +1,63 @@
 #!/usr/bin/env python3
-"""anonchat — use ChatGPT guest mode from the command line.
-
-Usage:
-    anonchat "message"
-    anonchat --model auto "message"
-    anonchat --proxy http://user:pass@host:port "message"
-    anonchat --stream "tell me a story"
-    anonchat --json "hello"
-
-Pipe-friendly — reads stdin if no argument given.
-"""
-
 import json as _json
 import sys
-import textwrap
+from time import time
+from uuid import uuid4
 
 from engine.session import ChatGPT
 
-
-def _fmt_plain(result):
-    return result['text']
-
-
-def _fmt_json(result):
-    return _json.dumps(result, indent=2, ensure_ascii=False)
-
-
-def _fmt_stream(token_iter):
-    for token in token_iter:
-        print(token, end='', flush=True)
-    print()
+try:
+    import tiktoken
+    _enc = tiktoken.get_encoding('o200k_base')
+    def _count(s):
+        return len(_enc.encode(s)) if s else 0
+except ImportError:
+    def _count(s):
+        return max(1, len(s) // 4)
 
 
-def chat(messages, stream=False, proxy=None, **_ignored):
-    last = next((m['content'] for m in reversed(messages) if m.get('role') == 'user'), None)
-    if not last:
-        last = messages[-1]['content'] if messages else ''
+def _build_openai_response(result, prompt_text):
+    model = result['model'] or 'auto'
+    content = result['text']
+    now = int(time())
+    msg_id = f'chatcmpl-{uuid4().hex[:16]}'
 
-    client = ChatGPT(proxy=proxy) if proxy else ChatGPT()
-    result = client.ask(last)
+    reasoning_text = ''
+    text = content
+    if '  ' in content:
+        end = content.find('  ')
+        reasoning_text = content[3:end]
+        text = content[end + 3:]
 
-    model_name = result['model'] or 'auto'
+    pt = _count(prompt_text)
+    ct = _count(text)
+    rt = _count(reasoning_text) if reasoning_text else 0
 
-    if stream:
-        for chunk in [result['text']]:
-            yield chunk
-        return
+    choice_msg = {'role': 'assistant', 'content': text}
+    if rt:
+        choice_msg['reasoning_content'] = reasoning_text
 
-    yield {
-        'text': result['text'],
-        'model': model_name,
+    usage = {'prompt_tokens': pt, 'completion_tokens': ct, 'total_tokens': pt + ct}
+    if rt:
+        usage['completion_tokens_details'] = {'reasoning_tokens': rt}
+
+    return {
+        'id': msg_id,
+        'object': 'chat.completion',
+        'created': now,
+        'model': model,
+        'choices': [{'index': 0, 'message': choice_msg, 'finish_reason': 'stop'}],
+        'usage': usage,
     }
 
 
 def main():
     import argparse
-
-    parser = argparse.ArgumentParser(description='ChatGPT guest mode CLI')
+    parser = argparse.ArgumentParser(description='anonchat — ChatGPT guest mode CLI')
     parser.add_argument('message', nargs='*', help='Message to send')
-    parser.add_argument('--model', default='auto', help='Model (default: auto)')
-    parser.add_argument('--proxy', help='Proxy URL (http://user:pass@host:port)')
-    parser.add_argument('--stream', action='store_true', help='Stream response')
-    parser.add_argument('--json', action='store_true', help='Output JSON')
-    parser.add_argument('--temperature', type=float)
-    parser.add_argument('--top-p', type=float)
-    parser.add_argument('--max-tokens', type=int)
-    parser.add_argument('--seed', type=int)
+    parser.add_argument('--proxy', help='Proxy (http://user:pass@host:port)')
+    parser.add_argument('--json', action='store_true', help='Output OpenAI-compatible JSON')
+    parser.add_argument('--stream', action='store_true', help='Stream response to stdout')
 
     args = parser.parse_args()
 
@@ -77,27 +69,26 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    messages = [{'role': 'user', 'content': text}]
-
     try:
-        results = list(chat(messages, stream=args.stream, proxy=args.proxy))
-
-        if args.stream:
-            for chunk in results:
-                print(chunk, end='', flush=True)
-            print()
-        elif args.json:
-            print(_json.dumps(results[0], indent=2, ensure_ascii=False))
-        else:
-            out = results[0]['text']
-            print(textwrap.fill(out, width=80) if '\n' not in out else out)
-
+        client = ChatGPT(proxy=args.proxy) if args.proxy else ChatGPT()
+        result = client.ask(text)
     except SystemExit:
         print('error: IP flagged by ChatGPT — try a different proxy', file=sys.stderr)
         sys.exit(2)
     except Exception as e:
         print(f'error: {e}', file=sys.stderr)
         sys.exit(1)
+
+    if args.stream:
+        print(result['text'], end='' if result['text'].endswith('\n') else '\n')
+        return
+
+    if args.json:
+        resp = _build_openai_response(result, f'user: {text}')
+        print(_json.dumps(resp, indent=2, ensure_ascii=False))
+        return
+
+    print(result['text'])
 
 
 if __name__ == '__main__':

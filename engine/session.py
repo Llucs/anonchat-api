@@ -42,7 +42,7 @@ class ChatGPT(_BaseChatGPT):
             elif 'v' in data and isinstance(data['v'], str):
                 parts.append(data['v'])
 
-        return ''.join(parts).replace('\n', '')
+        return ''.join(parts)
 
     def ask(self, message: str) -> dict:
         self.model_slug = None
