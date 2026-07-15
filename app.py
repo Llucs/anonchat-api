@@ -33,7 +33,13 @@ if _has_server:
 
     class Message(BaseModel):
         role: str
-        content: str
+        content: str | None = None
+        tool_calls: list | None = None
+        tool_call_id: str | None = None
+
+    class ToolDef(BaseModel):
+        type: str = 'function'
+        function: dict
 
     class ChatRequest(BaseModel):
         messages: list[Message]
@@ -53,34 +59,56 @@ if _has_server:
         conversation_id: str | None = None
         parent_message_id: str | None = None
         image: str | None = None
+        tools: list[ToolDef] | None = None
+        tool_choice: str | None = None
         extended: bool = False
 
     app = FastAPI(title='anonchat-api', version='1.0.0')
 
     @app.post('/v1/chat/completions')
     async def chat_completions(req: ChatRequest):
-        last = next((m.content for m in reversed(req.messages) if m.role == 'user'), None)
-        if not last:
+        last_msg = next((m for m in reversed(req.messages) if m.role == 'user'), None)
+        if not last_msg:
             raise HTTPException(400, 'No user message found')
 
-        prompt_text = '\n'.join(f'{m.role}: {m.content}' for m in req.messages)
+        prompt_text = '\n'.join(f'{m.role}: {m.content or ""}' for m in req.messages)
+
+        # Find tool_result messages (role='tool')
+        tool_results = []
+        conv_id = req.conversation_id
+        parent_id = req.parent_message_id
+        for m in req.messages:
+            if m.role == 'tool' and m.tool_call_id:
+                tool_results.append({'tool_call_id': m.tool_call_id, 'content': m.content or ''})
+            if m.role == 'assistant' and m.tool_calls:
+                if not conv_id:
+                    conv_id = getattr(m, 'conversation_id', None)
 
         try:
             client = ChatGPT(proxy=req.proxy) if req.proxy else ChatGPT()
             image = req.image
             requested_model = None if req.model == 'auto' else req.model
+
+            tools_list = [t.model_dump() for t in req.tools] if req.tools else None
+
             result = client.converse(
-                message=last,
+                message=last_msg.content or '',
                 image=image if (image and image.startswith('data:image') or (image and not image.startswith('http'))) else None,
-                conversation_id=req.conversation_id,
-                parent_message_id=req.parent_message_id,
+                conversation_id=conv_id,
+                parent_message_id=parent_id,
                 model=requested_model,
+                tools=tools_list,
+                tool_results=tool_results if tool_results else None,
+                tool_choice=req.tool_choice,
             )
         except SystemExit:
             raise HTTPException(502, 'IP flagged by ChatGPT')
         except Exception as e:
             logger.exception('chat failed')
             raise HTTPException(500, str(e))
+
+        if result.get('error'):
+            raise HTTPException(413, result['message'])
 
         model = result['model'] or req.model
         if model:
@@ -95,10 +123,12 @@ if _has_server:
 
         now = int(time())
         msg_id = f'chatcmpl-{uuid4().hex[:16]}'
-        text = result['text']
+        text = result.get('text', '')
         reasoning = result.get('reasoning', '')
         citations = result.get('citations')
         content_refs = result.get('content_references')
+        tool_calls = result.get('tool_calls')
+        finish_reason = result.get('finish_reason', 'stop')
 
         pt = _count(prompt_text)
         ct = _count(text)
@@ -111,11 +141,15 @@ if _has_server:
             choice_msg['citations'] = citations
         if content_refs:
             choice_msg['content_references'] = content_refs
+        if tool_calls:
+            choice_msg['tool_calls'] = tool_calls
+            if not text:
+                choice_msg['content'] = None
 
         choices = [{
             'index': 0,
             'message': choice_msg,
-            'finish_reason': 'stop',
+            'finish_reason': finish_reason,
         }]
 
         usage = {'prompt_tokens': pt, 'completion_tokens': ct, 'total_tokens': pt + ct}
@@ -148,8 +182,11 @@ if _has_server:
                 yield chunk({'role': 'assistant', 'content': ''})
                 if reasoning:
                     yield chunk({'reasoning_content': reasoning})
-                yield chunk({'content': text})
-                yield chunk({}, finish='stop')
+                if tool_calls:
+                    yield chunk({'tool_calls': tool_calls})
+                if text:
+                    yield chunk({'content': text})
+                yield chunk({}, finish=finish_reason)
                 yield 'data: [DONE]\n\n'
 
             return StreamingResponse(stream(), media_type='text/event-stream')

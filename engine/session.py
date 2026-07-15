@@ -129,6 +129,10 @@ class ChatGPT(_BaseChatGPT):
                         mid = msg.get('id')
                         if mid:
                             self.message_id = mid
+
+                        tc = msg.get('tool_calls') or meta.get('tool_calls')
+                        if tc:
+                            self._tool_calls = tc
                     elif role == 'user':
                         mid = msg.get('id')
                         if mid and not self.message_id:
@@ -147,21 +151,29 @@ class ChatGPT(_BaseChatGPT):
 
     def converse(self, message: str, image: str = None,
                  conversation_id: str = None, parent_message_id: str = None,
-                 model: str = None) -> dict:
+                 model: str = None, tools: list = None,
+                 tool_results: list = None, tool_choice: str = None) -> dict:
         self._reset_meta()
         self.resume_token = None
         self.rate_limits = None
         self._requested_model = model or 'auto'
+        self._tool_calls = None
 
         original_post = self.session.post
         def _patched_post(url, **kwargs):
             if 'json' in kwargs and 'model' in kwargs['json']:
                 kwargs['json']['model'] = self._requested_model
+            if tools and 'json' in kwargs:
+                kwargs['json']['tools'] = tools
+            if tool_choice and 'json' in kwargs:
+                kwargs['json']['tool_choice'] = tool_choice
             return original_post(url, **kwargs)
         self.session.post = _patched_post
 
         try:
-            if image:
+            if tool_results and conversation_id and parent_message_id:
+                self._send_tool_results(tool_results, conversation_id, parent_message_id)
+            elif image:
                 self.start_with_image(message, image)
             elif conversation_id and parent_message_id:
                 self._send_followup(message, conversation_id, parent_message_id)
@@ -175,10 +187,17 @@ class ChatGPT(_BaseChatGPT):
 
         text = self.response
         reasoning_text = ''
-        if '  ' in text:
-            end = text.find('  ')
-            reasoning_text = text[3:end]
-            text = text[end + 3:]
+
+        # Check if response is a tool call (no text content)
+        tool_calls = getattr(self, '_tool_calls', None)
+        if tool_calls and not text.strip():
+            finish_reason = 'tool_calls'
+        else:
+            finish_reason = 'stop'
+            if '  ' in text:
+                end = text.find('  ')
+                reasoning_text = text[3:end]
+                text = text[end + 3:]
 
         return {
             'text': text,
@@ -200,7 +219,94 @@ class ChatGPT(_BaseChatGPT):
             'harness': self.harness,
             'turn_use_case': self.turn_use_case,
             'server_ttfvt_ms': self.server_ttfvt_ms,
+            'tool_calls': tool_calls,
+            'finish_reason': finish_reason,
         }
+
+    def _send_tool_results(self, tool_results: list, conversation_id: str, parent_message_id: str):
+        from random import randint
+        from wrapper import Headers, Challenges, VM, Log
+        from uuid import uuid4
+        from time import time
+
+        if not self.data.get('prod'):
+            self._fetch_cookies()
+
+        self.data['conversation_id'] = conversation_id
+        self.data['parent_message_id'] = parent_message_id
+        self.conversation_id = conversation_id
+        self.parent_message_id = parent_message_id
+
+        conduit_token = self.get_conduit(next=True)
+        self._get_tokens(randint(self._turn_index, self._turn_index + 1000))
+        self._turn_index += 3000
+        time_1 = randint(self._turn_index, self._turn_index + 3000)
+        proof_token = Challenges.solve_pow(
+            self.data['proofofwork']['seed'],
+            self.data['proofofwork']['difficulty'],
+            self.data['config']
+        )
+        turnstile_token = VM.get_turnstile(
+            self.data['bytecode'],
+            self.data['vm_token'],
+            str(self.ip_info[:-1])
+        )
+
+        self.session.headers = Headers.CONVERSATION
+        self.session.headers.update({
+            'oai-client-version': self.data['prod'],
+            'oai-device-id': self.data['device-id'],
+            'oai-echo-logs': f'0,{time_1},1,{time_1 + randint(1000, 1200)}',
+            'openai-sentinel-chat-requirements-token': self.data['token'],
+            'openai-sentinel-proof-token': proof_token,
+            'openai-sentinel-turnstile-token': turnstile_token,
+            'x-conduit-token': conduit_token,
+        })
+
+        messages = []
+        for tr in tool_results:
+            messages.append({
+                'id': str(uuid4()),
+                'author': {'role': 'tool'},
+                'create_time': round(time(), 3),
+                'content': {'content_type': 'text', 'parts': [str(tr.get('content', ''))]},
+                'metadata': {'tool_call_id': tr.get('tool_call_id', '')},
+            })
+
+        payload = {
+            'action': 'next',
+            'messages': messages,
+            'conversation_id': conversation_id,
+            'parent_message_id': parent_message_id,
+            'model': 'auto',
+            'timezone_offset_min': self.timezone_offset,
+            'timezone': self.ip_info[5],
+            'history_and_training_disabled': True,
+            'conversation_mode': {'kind': 'primary_assistant'},
+            'enable_message_followups': True,
+            'system_hints': [],
+            'supports_buffering': True,
+            'supported_encodings': ['v1'],
+            'client_contextual_info': {
+                'is_dark_mode': True,
+                'time_since_loaded': randint(3, 6),
+                'page_height': 1219,
+                'page_width': 3440,
+                'pixel_ratio': 1,
+                'screen_height': 1440,
+                'screen_width': 3440,
+            },
+        }
+
+        r = self.session.post('https://chatgpt.com/backend-anon/f/conversation', json=payload)
+        self.session.cookies.update(r.cookies)
+        if 'Unusual activity' in r.text:
+            Log.Error('IP flagged by ChatGPT')
+            raise SystemExit(r.status_code)
+
+        self.data['conversation_id'] = conversation_id
+        self.conversation_id = conversation_id
+        self.response = self._parse_event_stream(r.text)
 
     def _send_followup(self, message: str, conversation_id: str, parent_message_id: str):
         from random import randint
