@@ -8,7 +8,6 @@ from json         import loads
 from time         import time
 from typing       import Any
 from base64       import b64decode
-from PIL import Image
 from io import BytesIO
 
 
@@ -570,6 +569,7 @@ class ChatGPT:
             image = image.split(",")[1]
             
         self.file_size: int = len(b64decode(image))
+        from PIL import Image
         self.width, self.height = Image.open(BytesIO(b64decode(image))).size
         
         image_data: dict = {
