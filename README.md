@@ -189,16 +189,26 @@ curl -X POST ... -d '{"proxy": "http://user:pass@ip:8080", ...}'
 
 ---
 
-## Docker
+## Dependências
 
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-COPY . .
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+**Mínimas** (CLI):
+
 ```
+curl_cffi    → TLS fingerprint Chrome (essencial)
+esprima      → Parser JS para resolver Turnstile
+```
+
+**Opcionais** (servidor HTTP):
+
+```
+fastapi, uvicorn, pydantic  → API server
+tiktoken                     → contagem precisa de tokens
+Pillow                       → upload de imagens
+```
+
+O CLI funciona com `pip install curl_cffi esprima` apenas.
+
+## Docker
 
 ```bash
 docker build -t anonchat-api .
