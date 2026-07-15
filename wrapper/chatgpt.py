@@ -1002,7 +1002,7 @@ class ChatGPT:
             timeout=REQUEST_TIMEOUT
         )
 
-        if 'Unusual activity' in response.text:
+        if response.status_code >= 400:
             Log.Error("Your IP got flagged by chatgpt, retry with a new IP")
             raise SystemExit(response.status_code)
 
