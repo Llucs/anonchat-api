@@ -3,12 +3,62 @@ from json import loads as _loads
 from wrapper import ChatGPT as _BaseChatGPT
 
 
+def _clean_markers(text):
+    while '\ue200' in text:
+        start = text.index('\ue200')
+        sep = text.index('\ue202', start)
+        try:
+            end = text.index('\ue201', sep + 1)
+        except ValueError:
+            break
+        inner = text[sep+1:end]
+        replacement = ''
+        if inner.startswith('['):
+            try:
+                items = _loads(inner)
+                if isinstance(items, list) and len(items) > 1:
+                    replacement = items[1] if isinstance(items[1], str) else ''
+                elif isinstance(items, list) and items:
+                    replacement = items[-1] if isinstance(items[-1], str) else ''
+            except Exception:
+                pass
+        text = text[:start] + replacement + text[end+1:]
+    return text
+
+
 class ChatGPT(_BaseChatGPT):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.model_slug = None
+        self.conversation_id = None
+        self.message_id = None
+        self.parent_message_id = None
+        self.resume_token = None
+        self.rate_limits = None
+        self.blocked_features = None
+        self.model_limits = None
+        self.citations = None
+        self.content_references = None
+        self.finish_details = None
+        self.did_reasoning = False
+        self.plan_type = None
+        self.cluster_region = None
+        self.harness = None
+        self.turn_use_case = None
+        self.server_ttfvt_ms = None
+        self._turn_index = 2000
+
+    def _reset_meta(self):
+        self.model_slug = None
+        self.message_id = None
+        self.citations = None
+        self.content_references = None
+        self.finish_details = None
+        self.did_reasoning = False
+        self.server_ttfvt_ms = None
 
     def _parse_event_stream(self, stream_data: str) -> str:
+        self._reset_meta()
         parts = []
         seen_assistant = False
 
@@ -24,24 +74,65 @@ class ChatGPT(_BaseChatGPT):
             if not isinstance(data, dict):
                 continue
 
-            if data.get('type') == 'server_ste_metadata':
-                self.model_slug = data['metadata'].get('model_slug')
+            t = data.get('type')
+
+            if t == 'server_ste_metadata':
+                m = data.get('metadata', {})
+                self.model_slug = m.get('model_slug')
+                self.did_reasoning = m.get('did_auto_switch_to_reasoning', False)
+                self.plan_type = m.get('plan_type')
+                self.cluster_region = m.get('cluster_region')
+                self.harness = m.get('harness')
+                self.turn_use_case = m.get('turn_use_case')
+                self.server_ttfvt_ms = m.get('server_ttfvt_ms')
+
+            if t == 'conversation_detail_metadata':
+                self.rate_limits = data.get('limits_progress')
+                self.blocked_features = data.get('blocked_features')
+                self.model_limits = data.get('model_limits')
+
+            if t == 'resume_conversation_token':
+                self.resume_token = data.get('token')
 
             if data.get('o') == 'patch' and isinstance(data.get('v'), list):
                 for op in data.get('v'):
                     if op.get('p') == '/message/metadata':
-                        slug = op.get('v', {}).get('resolved_model_slug')
+                        meta = op.get('v', {})
+                        slug = meta.get('resolved_model_slug')
                         if slug:
                             self.model_slug = slug
+                        if meta.get('citations'):
+                            self.citations = meta['citations']
+                        if meta.get('content_references'):
+                            self.content_references = meta['content_references']
+                        if meta.get('finish_details'):
+                            self.finish_details = meta['finish_details']
 
             if data.get('o') == 'add' and data.get('p') == '':
                 v = data.get('v', {})
                 msg = v.get('message', {})
-                if msg.get('author', {}).get('role') == 'assistant':
+                role = msg.get('author', {}).get('role')
+
+                if role == 'assistant':
                     seen_assistant = True
                     initial = msg.get('content', {}).get('parts', [])
                     if initial and initial[0]:
                         parts.append(initial[0])
+                    meta = msg.get('metadata', {})
+                    if meta.get('citations'):
+                        self.citations = meta['citations']
+                    if meta.get('content_references'):
+                        self.content_references = meta['content_references']
+                    if meta.get('finish_details'):
+                        self.finish_details = meta['finish_details']
+                    mid = msg.get('id')
+                    if mid:
+                        self.message_id = mid
+
+                if role == 'user':
+                    mid = msg.get('id')
+                    if mid and not self.message_id:
+                        self.parent_message_id = mid
 
             if data.get('o') == 'append' and data.get('p') == '/message/content/parts/0':
                 parts.append(data.get('v'))
@@ -52,33 +143,133 @@ class ChatGPT(_BaseChatGPT):
             elif 'v' in data and isinstance(data['v'], str) and seen_assistant:
                 parts.append(data['v'])
 
-        text = ''.join(parts)
-        while '\ue200' in text:
-            start = text.index('\ue200')
-            sep = text.index('\ue202', start)
-            try:
-                end = text.index('\ue201', sep + 1)
-            except ValueError:
-                break
-            inner = text[sep+1:end]
-            replacement = ''
-            if inner.startswith('['):
-                try:
-                    items = _loads(inner)
-                    if isinstance(items, list) and len(items) > 1:
-                        name = items[1] if isinstance(items[1], str) else ''
-                        replacement = name if name else (items[-1] if isinstance(items[-1], str) else '')
-                    elif isinstance(items, list) and items:
-                        replacement = items[-1] if isinstance(items[-1], str) else ''
-                except Exception:
-                    pass
-            text = text[:start] + replacement + text[end+1:]
-        return text
+        return _clean_markers(''.join(parts))
 
-    def ask(self, message: str) -> dict:
-        self.model_slug = None
-        self.ask_question(message)
+    def converse(self, message: str, image: str = None,
+                 conversation_id: str = None, parent_message_id: str = None) -> dict:
+        self._reset_meta()
+        self.resume_token = None
+        self.rate_limits = None
+
+        if image:
+            self.start_with_image(message, image)
+        elif conversation_id and parent_message_id:
+            self._send_followup(message, conversation_id, parent_message_id)
+        else:
+            self.ask_question(message)
+
+        conv_id = self.data.get('conversation_id') or self.conversation_id
+        parent_id = self.data.get('parent_message_id') or self.parent_message_id
+
+        text = self.response
+        reasoning_text = ''
+        if '  ' in text:
+            end = text.find('  ')
+            reasoning_text = text[3:end]
+            text = text[end + 3:]
+
         return {
-            'text': self.response,
+            'text': text,
+            'reasoning': reasoning_text,
             'model': self.model_slug,
+            'conversation_id': conv_id,
+            'message_id': self.message_id,
+            'parent_message_id': parent_id,
+            'resume_token': self.resume_token,
+            'rate_limits': self.rate_limits,
+            'blocked_features': self.blocked_features,
+            'model_limits': self.model_limits,
+            'citations': self.citations,
+            'content_references': self.content_references,
+            'finish_details': self.finish_details,
+            'did_reasoning': self.did_reasoning,
+            'plan_type': self.plan_type,
+            'cluster_region': self.cluster_region,
+            'harness': self.harness,
+            'turn_use_case': self.turn_use_case,
+            'server_ttfvt_ms': self.server_ttfvt_ms,
         }
+
+    def _send_followup(self, message: str, conversation_id: str, parent_message_id: str):
+        from random import randint
+        from wrapper import Headers, Challenges, VM, Log
+        from uuid import uuid4
+        from time import time
+
+        if not self.data.get('prod'):
+            self._fetch_cookies()
+
+        self.data['conversation_id'] = conversation_id
+        self.data['parent_message_id'] = parent_message_id
+        self.conversation_id = conversation_id
+        self.parent_message_id = parent_message_id
+
+        conduit_token = self.get_conduit(next=True)
+
+        self._get_tokens(randint(self._turn_index, self._turn_index + 1000))
+        self._turn_index += 3000
+
+        time_1 = randint(self._turn_index, self._turn_index + 3000)
+        proof_token = Challenges.solve_pow(
+            self.data['proofofwork']['seed'],
+            self.data['proofofwork']['difficulty'],
+            self.data['config']
+        )
+        turnstile_token = VM.get_turnstile(
+            self.data['bytecode'],
+            self.data['vm_token'],
+            str(self.ip_info[:-1])
+        )
+
+        self.session.headers = Headers.CONVERSATION
+        self.session.headers.update({
+            'oai-client-version': self.data['prod'],
+            'oai-device-id': self.data['device-id'],
+            'oai-echo-logs': f'0,{time_1},1,{time_1 + randint(1000, 1200)}',
+            'openai-sentinel-chat-requirements-token': self.data['token'],
+            'openai-sentinel-proof-token': proof_token,
+            'openai-sentinel-turnstile-token': turnstile_token,
+            'x-conduit-token': conduit_token,
+        })
+
+        payload = {
+            'action': 'next',
+            'messages': [{
+                'id': str(uuid4()),
+                'author': {'role': 'user'},
+                'create_time': round(time(), 3),
+                'content': {'content_type': 'text', 'parts': [message]},
+                'metadata': {},
+            }],
+            'conversation_id': conversation_id,
+            'parent_message_id': parent_message_id,
+            'model': 'auto',
+            'timezone_offset_min': self.timezone_offset,
+            'timezone': self.ip_info[5],
+            'history_and_training_disabled': True,
+            'conversation_mode': {'kind': 'primary_assistant'},
+            'enable_message_followups': True,
+            'system_hints': [],
+            'supports_buffering': True,
+            'supported_encodings': ['v1'],
+            'client_contextual_info': {
+                'is_dark_mode': True,
+                'time_since_loaded': randint(3, 6),
+                'page_height': 1219,
+                'page_width': 3440,
+                'pixel_ratio': 1,
+                'screen_height': 1440,
+                'screen_width': 3440,
+            },
+        }
+
+        r = self.session.post('https://chatgpt.com/backend-anon/f/conversation', json=payload)
+        self.session.cookies.update(r.cookies)
+
+        if 'Unusual activity' in r.text:
+            Log.Error('IP flagged by ChatGPT')
+            raise SystemExit(r.status_code)
+
+        self.data['conversation_id'] = conversation_id
+        self.conversation_id = conversation_id
+        self.response = self._parse_event_stream(r.text)

@@ -17,31 +17,32 @@ except ImportError:
 
 
 def _build_openai_response(result, prompt_text):
-    model = result['model'] or 'auto'
-    content = result['text']
+    model = result.get('model') or 'auto'
+    text = result.get('text', '')
     now = int(time())
     msg_id = f'chatcmpl-{uuid4().hex[:16]}'
 
-    reasoning_text = ''
-    text = content
-    if '  ' in content:
-        end = content.find('  ')
-        reasoning_text = content[3:end]
-        text = content[end + 3:]
+    reasoning = result.get('reasoning', '')
+    citations = result.get('citations')
+    content_refs = result.get('content_references')
 
     pt = _count(prompt_text)
     ct = _count(text)
-    rt = _count(reasoning_text) if reasoning_text else 0
+    rt = _count(reasoning) if reasoning else 0
 
     choice_msg = {'role': 'assistant', 'content': text}
     if rt:
-        choice_msg['reasoning_content'] = reasoning_text
+        choice_msg['reasoning_content'] = reasoning
+    if citations:
+        choice_msg['citations'] = citations
+    if content_refs:
+        choice_msg['content_references'] = content_refs
 
     usage = {'prompt_tokens': pt, 'completion_tokens': ct, 'total_tokens': pt + ct}
     if rt:
         usage['completion_tokens_details'] = {'reasoning_tokens': rt}
 
-    return {
+    body = {
         'id': msg_id,
         'object': 'chat.completion',
         'created': now,
@@ -50,15 +51,35 @@ def _build_openai_response(result, prompt_text):
         'usage': usage,
     }
 
+    if result.get('conversation_id'):
+        body['conversation_id'] = result['conversation_id']
+    if result.get('parent_message_id'):
+        body['parent_message_id'] = result['parent_message_id']
+    if result.get('rate_limits'):
+        body['rate_limits'] = result['rate_limits']
+    if result.get('resume_token'):
+        body['resume_token'] = result['resume_token']
+    if result.get('plan_type'):
+        body['plan_type'] = result['plan_type']
+    if result.get('cluster_region'):
+        body['cluster_region'] = result['cluster_region']
+    if result.get('did_reasoning'):
+        body['did_reasoning'] = True
+
+    return body
+
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description='anonchat — ChatGPT guest mode CLI')
+    import argparse as _argparse
+    parser = _argparse.ArgumentParser(description='anonchat — ChatGPT guest mode CLI')
     parser.add_argument('message', nargs='*', help='Message to send')
     parser.add_argument('--proxy', help='Proxy (http://user:pass@host:port)')
     parser.add_argument('--json', action='store_true', help='Output OpenAI-compatible JSON')
-    parser.add_argument('--stream', action='store_true', help='Stream response to stdout')
-    parser.add_argument('--quiet', '-q', action='store_true', help='Suppress logs and warnings')
+    parser.add_argument('--stream', action='store_true', help='Stream response')
+    parser.add_argument('--quiet', '-q', action='store_true', help='Suppress logs')
+    parser.add_argument('--image', help='Image file path or base64 data:image/...')
+    parser.add_argument('--conversation-id', help='Resume existing conversation')
+    parser.add_argument('--parent-message-id', help='Parent message for follow-up')
 
     args = parser.parse_args()
 
@@ -78,11 +99,26 @@ def main():
         parser.print_help()
         sys.exit(1)
 
+    image_data = None
+    if args.image:
+        if args.image.startswith('data:image'):
+            image_data = args.image
+        else:
+            with open(args.image, 'rb') as f:
+                import base64
+                b64 = base64.b64encode(f.read()).decode()
+                image_data = f'data:image/png;base64,{b64}'
+
     try:
         client = ChatGPT(proxy=args.proxy) if args.proxy else ChatGPT()
-        result = client.ask(text)
+        result = client.converse(
+            message=text,
+            image=image_data,
+            conversation_id=args.conversation_id,
+            parent_message_id=args.parent_message_id,
+        )
     except SystemExit:
-        print('error: IP flagged by ChatGPT — try a different proxy', file=sys.stderr)
+        print('error: IP flagged by ChatGPT', file=sys.stderr)
         sys.exit(2)
     except Exception as e:
         print(f'error: {e}', file=sys.stderr)
@@ -93,7 +129,8 @@ def main():
         return
 
     if args.json:
-        resp = _build_openai_response(result, f'user: {text}')
+        prompt_text = f'user: {text}'
+        resp = _build_openai_response(result, prompt_text)
         print(_json.dumps(resp, indent=2, ensure_ascii=False))
         return
 

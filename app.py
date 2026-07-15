@@ -9,15 +9,16 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger('anonchat')
 
 _seen_models = set()
+_global_rate_limits = None
 
 try:
     import tiktoken
     _enc = tiktoken.get_encoding('o200k_base')
-    def _count_tokens(text):
-        return len(_enc.encode(text)) if text else 0
+    def _count(s):
+        return len(_enc.encode(s)) if s else 0
 except ImportError:
-    def _count_tokens(text):
-        return max(1, len(text) // 4)
+    def _count(s):
+        return max(1, len(s) // 4)
 
 try:
     from fastapi import FastAPI, HTTPException
@@ -49,6 +50,9 @@ if _has_server:
         presence_penalty: float | None = None
         seed: int | None = None
         user: str | None = None
+        conversation_id: str | None = None
+        parent_message_id: str | None = None
+        image: str | None = None
 
     app = FastAPI(title='anonchat-api', version='1.0.0')
 
@@ -62,9 +66,15 @@ if _has_server:
 
         try:
             client = ChatGPT(proxy=req.proxy) if req.proxy else ChatGPT()
-            result = client.ask(last)
+            image = req.image
+            result = client.converse(
+                message=last,
+                image=image if (image and image.startswith('data:image') or (image and not image.startswith('http'))) else None,
+                conversation_id=req.conversation_id,
+                parent_message_id=req.parent_message_id,
+            )
         except SystemExit:
-            raise HTTPException(502, 'IP flagged by ChatGPT - try a different proxy')
+            raise HTTPException(502, 'IP flagged by ChatGPT')
         except Exception as e:
             logger.exception('chat failed')
             raise HTTPException(500, str(e))
@@ -73,25 +83,28 @@ if _has_server:
         if model:
             _seen_models.add(model)
 
-        content = result['text']
+        global _global_rate_limits
+        if result.get('rate_limits'):
+            _global_rate_limits = result['rate_limits']
+
         now = int(time())
         msg_id = f'chatcmpl-{uuid4().hex[:16]}'
+        text = result['text']
+        reasoning = result.get('reasoning', '')
+        citations = result.get('citations')
+        content_refs = result.get('content_references')
 
-        reasoning_text = ''
-        text = content
-
-        if '  ' in content:
-            end = content.find('  ')
-            reasoning_text = content[3:end]
-            text = content[end + 3:]
-
-        prompt_tokens = _count_tokens(prompt_text)
-        completion_tokens = _count_tokens(text)
-        reasoning_tokens = _count_tokens(reasoning_text) if reasoning_text else 0
+        pt = _count(prompt_text)
+        ct = _count(text)
+        rt = _count(reasoning) if reasoning else 0
 
         choice_msg = {'role': 'assistant', 'content': text}
-        if reasoning_tokens:
-            choice_msg['reasoning_content'] = reasoning_text
+        if rt:
+            choice_msg['reasoning_content'] = reasoning
+        if citations:
+            choice_msg['citations'] = citations
+        if content_refs:
+            choice_msg['content_references'] = content_refs
 
         choices = [{
             'index': 0,
@@ -99,15 +112,9 @@ if _has_server:
             'finish_reason': 'stop',
         }]
 
-        usage = {
-            'prompt_tokens': prompt_tokens,
-            'completion_tokens': completion_tokens,
-            'total_tokens': prompt_tokens + completion_tokens,
-        }
-        if reasoning_tokens:
-            usage['completion_tokens_details'] = {
-                'reasoning_tokens': reasoning_tokens,
-            }
+        usage = {'prompt_tokens': pt, 'completion_tokens': ct, 'total_tokens': pt + ct}
+        if rt:
+            usage['completion_tokens_details'] = {'reasoning_tokens': rt}
 
         body = {
             'id': msg_id,
@@ -118,6 +125,25 @@ if _has_server:
             'usage': usage,
         }
 
+        conv_id = result.get('conversation_id')
+        parent_id = result.get('parent_message_id')
+        if conv_id:
+            body['conversation_id'] = conv_id
+        if parent_id:
+            body['parent_message_id'] = parent_id
+        if result.get('rate_limits'):
+            body['rate_limits'] = result['rate_limits']
+        if result.get('plan_type'):
+            body['plan_type'] = result['plan_type']
+        if result.get('cluster_region'):
+            body['cluster_region'] = result['cluster_region']
+        if result.get('did_reasoning'):
+            body['did_reasoning'] = True
+        if result.get('server_ttfvt_ms'):
+            body['server_ttfvt_ms'] = result['server_ttfvt_ms']
+        if result.get('resume_token'):
+            body['resume_token'] = result['resume_token']
+
         if req.stream:
             async def stream():
                 def chunk(delta, finish=None):
@@ -125,8 +151,8 @@ if _has_server:
                          'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}]}
                     return f'data: {_json.dumps(d)}\n\n'
                 yield chunk({'role': 'assistant', 'content': ''})
-                if reasoning_text:
-                    yield chunk({'reasoning_content': reasoning_text})
+                if reasoning:
+                    yield chunk({'reasoning_content': reasoning})
                 yield chunk({'content': text})
                 yield chunk({}, finish='stop')
                 yield 'data: [DONE]\n\n'
@@ -147,10 +173,16 @@ if _has_server:
                 models.append({'id': m, 'object': 'model', 'created': 1700000000, 'owned_by': 'openai'})
         return {'object': 'list', 'data': models}
 
+    @app.get('/v1/usage')
+    async def usage():
+        return {
+            'rate_limits': _global_rate_limits or {},
+        }
+
 
 if __name__ == '__main__':
     if _has_server:
         run(app, host='0.0.0.0', port=8000, log_level='info')
     else:
-        print('Server dependencies not installed. Install with: pip install fastapi uvicorn pydantic')
-        print('Or use the CLI: anonchat "your message"')
+        print('Server deps not installed. Install: pip install fastapi uvicorn pydantic')
+        print('Or use CLI: anonchat "message"')
