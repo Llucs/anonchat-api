@@ -36,13 +36,18 @@ anonchat --proxy http://user:pass@ip:port "Hello"
 
 # Pipe-friendly
 echo "Count to 10" | anonchat --json
+
+# Silencioso (para scripts)
+result=$(anonchat --json --quiet "Hello")
+echo "$result" | jq '.choices[0].message.content'
 ```
 
 ### Argumentos
 
 | Flag | Descrição |
 |------|-----------|
-| `--json` | Saída em JSON (model, text) |
+| `--json` | Saída em formato OpenAI (`chat.completion`) |
+| `--quiet` / `-q` | Suprime logs e warnings (ideal para scripts) |
 | `--stream` | Printa conforme chega |
 | `--proxy` | Proxy HTTP (formato `http://user:pass@ip:port`) |
 | `--model` | Modelo (sempre `auto`, o servidor decide) |
