@@ -5,7 +5,7 @@ from time import time
 from uuid import uuid4
 
 from engine.session import ChatGPT
-from engine.response import build_chat_response, _count
+from engine.response import build_chat_response, build_stream_chunk, _count
 
 try:
     import tiktoken
@@ -119,7 +119,11 @@ def main():
         try:
             client = ChatGPT(proxy=args.proxy) if args.proxy else ChatGPT()
             requested_model = None if args.model == 'auto' else args.model
-            final_model = requested_model or 'auto'
+            now = int(time())
+            msg_id = f'chatcmpl-{uuid4().hex[:16]}'
+            model = requested_model or 'auto'
+            sys.stdout.write(f'data: {_json.dumps(build_stream_chunk(msg_id, now, model, {"role": "assistant", "content": ""}))}\n\n')
+            sys.stdout.flush()
             for event in client.converse_stream(
                 message=text,
                 image=image_data,
@@ -128,14 +132,19 @@ def main():
                 model=requested_model,
             ):
                 if event['type'] == 'chunk':
-                    sys.stdout.write(event['text'])
+                    chunk_data = build_stream_chunk(msg_id, now, model, {'content': event['text']})
+                    sys.stdout.write(f'data: {_json.dumps(chunk_data)}\n\n')
                     sys.stdout.flush()
                 elif event['type'] == 'done':
-                    final_model = event.get('model') or final_model
+                    model = event.get('model') or model
                 elif event['type'] == 'error':
-                    print(f'\nerror: {event["error"]}', file=sys.stderr)
-                    sys.exit(2)
-            sys.stdout.write('\n')
+                    chunk_data = build_stream_chunk(msg_id, now, model, {}, 'error')
+                    sys.stdout.write(f'data: {_json.dumps(chunk_data)}\n\n')
+                    sys.stdout.flush()
+            chunk_data = build_stream_chunk(msg_id, now, model, {}, 'stop')
+            sys.stdout.write(f'data: {_json.dumps(chunk_data)}\n\n')
+            sys.stdout.write('data: [DONE]\n\n')
+            sys.stdout.flush()
         except Exception as e:
             print(f'error: {e}', file=sys.stderr)
             sys.exit(1)
