@@ -108,31 +108,30 @@ class ChatGPT(_BaseChatGPT):
                         if meta.get('finish_details'):
                             self.finish_details = meta['finish_details']
 
-            if data.get('o') == 'add' and data.get('p') == '':
-                v = data.get('v', {})
+            v = data.get('v', {})
+            if isinstance(v, dict):
                 msg = v.get('message', {})
-                role = msg.get('author', {}).get('role')
-
-                if role == 'assistant':
-                    seen_assistant = True
-                    initial = msg.get('content', {}).get('parts', [])
-                    if initial and initial[0]:
-                        parts.append(initial[0])
-                    meta = msg.get('metadata', {})
-                    if meta.get('citations'):
-                        self.citations = meta['citations']
-                    if meta.get('content_references'):
-                        self.content_references = meta['content_references']
-                    if meta.get('finish_details'):
-                        self.finish_details = meta['finish_details']
-                    mid = msg.get('id')
-                    if mid:
-                        self.message_id = mid
-
-                if role == 'user':
-                    mid = msg.get('id')
-                    if mid and not self.message_id:
-                        self.parent_message_id = mid
+                if isinstance(msg, dict):
+                    role = msg.get('author', {}).get('role')
+                    if role == 'assistant':
+                        seen_assistant = True
+                        initial = msg.get('content', {}).get('parts', [])
+                        if initial and initial[0]:
+                            parts.append(initial[0])
+                        meta = msg.get('metadata', {})
+                        if meta.get('citations'):
+                            self.citations = meta['citations']
+                        if meta.get('content_references'):
+                            self.content_references = meta['content_references']
+                        if meta.get('finish_details'):
+                            self.finish_details = meta['finish_details']
+                        mid = msg.get('id')
+                        if mid:
+                            self.message_id = mid
+                    elif role == 'user':
+                        mid = msg.get('id')
+                        if mid and not self.message_id:
+                            self.parent_message_id = mid
 
             if data.get('o') == 'append' and data.get('p') == '/message/content/parts/0':
                 parts.append(data.get('v'))
