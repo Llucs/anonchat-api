@@ -31,8 +31,19 @@ REQUEST_TIMEOUT = 30
 
 class ChatGPT:
 
+    _CHROME_VERSIONS = ["chrome146", "chrome145", "chrome142", "chrome136", "chrome133a", "chrome131", "chrome"]
+
     def __init__(self, proxy: str=None, cookies: dict = None) -> Any:
-        self.session: requests.session.Session = requests.Session(impersonate="chrome134")
+        session = None
+        for v in ChatGPT._CHROME_VERSIONS:
+            try:
+                session = requests.Session(impersonate=v)
+                break
+            except Exception:
+                continue
+        if session is None:
+            session = requests.Session()
+        self.session: requests.session.Session = session
         self.session.headers = Headers.DEFAULT
         self.data: dict = {}
 
