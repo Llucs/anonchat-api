@@ -58,8 +58,17 @@ def main():
     parser.add_argument('--proxy', help='Proxy (http://user:pass@host:port)')
     parser.add_argument('--json', action='store_true', help='Output OpenAI-compatible JSON')
     parser.add_argument('--stream', action='store_true', help='Stream response to stdout')
+    parser.add_argument('--quiet', '-q', action='store_true', help='Suppress logs and warnings')
 
     args = parser.parse_args()
+
+    if args.quiet:
+        import warnings
+        warnings.filterwarnings('ignore', category=FutureWarning)
+        import wrapper.logger
+        wrapper.logger.Log.Success = lambda *a, **kw: None
+        wrapper.logger.Log.Error = lambda *a, **kw: None
+        wrapper.logger.Log.Info = lambda *a, **kw: None
 
     if args.message:
         text = ' '.join(args.message)
