@@ -115,6 +115,32 @@ def main():
         ]}, indent=2))
         return
 
+    if args.stream:
+        try:
+            client = ChatGPT(proxy=args.proxy) if args.proxy else ChatGPT()
+            requested_model = None if args.model == 'auto' else args.model
+            final_model = requested_model or 'auto'
+            for event in client.converse_stream(
+                message=text,
+                image=image_data,
+                conversation_id=args.conversation_id,
+                parent_message_id=args.parent_message_id,
+                model=requested_model,
+            ):
+                if event['type'] == 'chunk':
+                    sys.stdout.write(event['text'])
+                    sys.stdout.flush()
+                elif event['type'] == 'done':
+                    final_model = event.get('model') or final_model
+                elif event['type'] == 'error':
+                    print(f'\nerror: {event["error"]}', file=sys.stderr)
+                    sys.exit(2)
+            sys.stdout.write('\n')
+        except Exception as e:
+            print(f'error: {e}', file=sys.stderr)
+            sys.exit(1)
+        return
+
     try:
         client = ChatGPT(proxy=args.proxy) if args.proxy else ChatGPT()
         requested_model = None if args.model == 'auto' else args.model
@@ -131,10 +157,6 @@ def main():
     except Exception as e:
         print(f'error: {e}', file=sys.stderr)
         sys.exit(1)
-
-    if args.stream:
-        print(result['text'], end='' if result['text'].endswith('\n') else '\n')
-        return
 
     if args.json:
         prompt_text = f'user: {text}'

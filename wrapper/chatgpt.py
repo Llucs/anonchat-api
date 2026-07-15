@@ -895,3 +895,157 @@ class ChatGPT:
             self.start_with_image(message, image)
 
         return self.response
+
+    def _stream_sse(self, response) -> Generator[str, None, None]:
+        seen_assistant = False
+        for line in response.iter_lines():
+            if not line:
+                continue
+            if isinstance(line, bytes):
+                line = line.decode('utf-8', errors='replace')
+            if not line.startswith('data:'):
+                continue
+            data_str = line[5:].strip()
+            if data_str == '[DONE]':
+                break
+            try:
+                data = loads(data_str)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+
+            t = data.get('type')
+            if t == 'server_ste_metadata':
+                m = data.get('metadata', {})
+                if hasattr(self, 'model_slug'):
+                    self.model_slug = m.get('model_slug')
+            if t == 'conversation_detail_metadata':
+                if hasattr(self, 'rate_limits'):
+                    self.rate_limits = data.get('limits_progress')
+            if t == 'resume_conversation_token':
+                if hasattr(self, 'resume_token'):
+                    self.resume_token = data.get('token')
+
+            if data.get('o') == 'patch' and isinstance(data.get('v'), list):
+                for op in data.get('v'):
+                    if op.get('p') == '/message/metadata':
+                        meta = op.get('v', {})
+                        if hasattr(self, 'model_slug') and meta.get('resolved_model_slug'):
+                            self.model_slug = meta.get('resolved_model_slug')
+                        if hasattr(self, 'message_id') and op.get('p', '').startswith('/message'):
+                            pass
+
+            v = data.get('v', {})
+            if isinstance(v, dict):
+                msg = v.get('message', {})
+                if isinstance(msg, dict):
+                    role = msg.get('author', {}).get('role')
+                    if role == 'assistant':
+                        seen_assistant = True
+                        initial = msg.get('content', {}).get('parts', [])
+                        if initial and initial[0]:
+                            yield initial[0]
+                        mid = msg.get('id')
+                        if mid and hasattr(self, 'message_id'):
+                            self.message_id = mid
+
+            if data.get('o') == 'append' and data.get('p') == '/message/content/parts/0':
+                chunk = data.get('v', '')
+                if chunk:
+                    yield chunk
+            elif data.get('o') == 'patch' and isinstance(data.get('v'), list) and seen_assistant:
+                for op in data.get('v'):
+                    if op.get('o') == 'append' and op.get('p') == '/message/content/parts/0':
+                        chunk = op.get('v', '')
+                        if chunk:
+                            yield chunk
+            elif 'v' in data and isinstance(data['v'], str) and seen_assistant:
+                yield data['v']
+
+    def start_conversation_stream(self, message: str) -> Generator[str, None, None]:
+        self._get_tokens()
+        conduit_token: str = self.get_conduit()
+
+        time_1: int = randint(6000, 9000)
+        proof_token: str = Challenges.solve_pow(
+            self.data["proofofwork"]["seed"],
+            self.data["proofofwork"]["difficulty"],
+            self.data["config"]
+        )
+        if not proof_token:
+            raise RuntimeError("Failed to solve Proof-of-Work challenge")
+        Log.Success(f"Solved POW: {proof_token[:20]}...")
+        turnstile_token: str = VM.get_turnstile(
+            self.data["bytecode"], self.data["vm_token"], str(self.ip_info[:-1])
+        )
+
+        tz_name = self.ip_info[5] if len(self.ip_info) > 5 else 'UTC'
+
+        self.session.headers = Headers.CONVERSATION
+        self.session.headers.update({
+            'oai-client-version': self.data["prod"],
+            'oai-device-id': self.data["device-id"],
+            'oai-echo-logs': f'0,{time_1},1,{time_1 + randint(1000, 1200)}',
+            'openai-sentinel-chat-requirements-token': self.data["token"],
+            'openai-sentinel-proof-token': proof_token,
+            'openai-sentinel-turnstile-token': turnstile_token,
+            'x-conduit-token': conduit_token,
+        })
+
+        conversation_data: dict = self._build_payload(message, tz_name)
+
+        response = self.session.post(
+            'https://chatgpt.com/backend-anon/f/conversation',
+            json=conversation_data,
+            stream=True,
+            timeout=REQUEST_TIMEOUT
+        )
+
+        if 'Unusual activity' in response.text:
+            Log.Error("Your IP got flagged by chatgpt, retry with a new IP")
+            raise SystemExit(response.status_code)
+
+        full_text = []
+        for chunk in self._stream_sse(response):
+            full_text.append(chunk)
+            yield chunk
+
+        self.response = (''.join(full_text)).replace("\n", "")
+
+    def _build_payload(self, message: str, tz_name: str) -> dict:
+        return {
+            'action': 'next',
+            'messages': [{
+                'id': str(uuid4()),
+                'author': {'role': 'user'},
+                'create_time': round(time(), 3),
+                'content': {'content_type': 'text', 'parts': [message]},
+                'metadata': {
+                    'selected_github_repos': [],
+                    'selected_all_github_repos': False,
+                    'serialization_metadata': {'custom_symbol_offsets': []},
+                },
+            }],
+            'parent_message_id': 'client-created-root',
+            'model': 'auto',
+            'timezone_offset_min': self.timezone_offset,
+            'timezone': tz_name,
+            'history_and_training_disabled': True,
+            'conversation_mode': {'kind': 'primary_assistant'},
+            'enable_message_followups': True,
+            'system_hints': [],
+            'supports_buffering': True,
+            'supported_encodings': ['v1'],
+            'client_contextual_info': {
+                'is_dark_mode': True,
+                'time_since_loaded': randint(3, 6),
+                'page_height': 1219,
+                'page_width': 3440,
+                'pixel_ratio': 1,
+                'screen_height': 1440,
+                'screen_width': 3440,
+            },
+            'paragen_cot_summary_display_override': 'allow',
+            'force_parallel_switch': 'auto',
+        }

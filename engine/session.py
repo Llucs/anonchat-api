@@ -242,6 +242,35 @@ class ChatGPT(_BaseChatGPT):
             'finish_reason': finish_reason,
         }
 
+    def converse_stream(self, message: str, image: str = None,
+                        conversation_id: str = None, parent_message_id: str = None,
+                        model: str = None) -> Generator[dict, None, None]:
+        self._reset_meta()
+        self.resume_token = None
+        self.rate_limits = None
+        self._requested_model = model or 'auto'
+        self._tool_calls = None
+
+        yield {'type': 'meta', 'model': self._requested_model}
+
+        try:
+            for chunk in self.start_conversation_stream(message):
+                yield {'type': 'chunk', 'text': chunk}
+        except SystemExit:
+            yield {'type': 'error', 'error': 'IP flagged by ChatGPT'}
+            return
+        except RuntimeError as e:
+            yield {'type': 'error', 'error': str(e)}
+            return
+
+        yield {
+            'type': 'done',
+            'model': self.model_slug,
+            'conversation_id': self.data.get('conversation_id') or self.conversation_id,
+            'message_id': self.message_id,
+            'parent_message_id': self.data.get('parent_message_id') or self.parent_message_id,
+        }
+
     def _send_tool_results(self, tool_results: list, conversation_id: str, parent_message_id: str):
         from random import randint
         from wrapper import Headers, Challenges, VM, Log

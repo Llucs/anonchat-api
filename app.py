@@ -134,7 +134,42 @@ if _has_server:
                     image_param = image
                 else:
                     image_param = image
+        except SystemExit:
+            return JSONResponse(content={'error': {'message': 'IP flagged by ChatGPT. Use a different IP or proxy.', 'type': 'ip_flagged', 'code': 'ip_flagged', 'param': None}}, status_code=502)
 
+        if req.stream:
+            now = int(time())
+            msg_id = f'chatcmpl-{uuid4().hex[:16]}'
+
+            def stream():
+                yield f'data: {_json.dumps(build_stream_chunk(msg_id, now, req.model, {"role": "assistant", "content": ""}))}\n\n'
+                try:
+                    for event in client.converse_stream(
+                        message=message_text,
+                        image=image_param,
+                        conversation_id=conv_id,
+                        parent_message_id=parent_id,
+                        model=requested_model,
+                    ):
+                        if event['type'] == 'chunk':
+                            chunk_data = build_stream_chunk(msg_id, now, req.model, {'content': event['text']})
+                            yield f'data: {_json.dumps(chunk_data)}\n\n'
+                        elif event['type'] == 'done':
+                            model = event.get('model') or req.model
+                            if model and model != 'auto':
+                                _known_models.add(model)
+                        elif event['type'] == 'error':
+                            chunk_data = build_stream_chunk(msg_id, now, req.model, {}, 'error')
+                            yield f'data: {_json.dumps(chunk_data)}\n\n'
+                except Exception as e:
+                    logger.exception('stream failed')
+                chunk_data = build_stream_chunk(msg_id, now, req.model, {}, 'stop')
+                yield f'data: {_json.dumps(chunk_data)}\n\n'
+                yield 'data: [DONE]\n\n'
+
+            return StreamingResponse(stream(), media_type='text/event-stream')
+
+        try:
             result = client.converse(
                 message=message_text,
                 image=image_param,
@@ -169,35 +204,6 @@ if _has_server:
             _global_rate_limits = result['rate_limits']
 
         body = build_chat_response(result, prompt_text, model, extended=req.extended)
-
-        if req.response_format and req.response_format.type == 'json_object':
-            body['choices'][0]['message']['content'] = body['choices'][0]['message']['content']
-
-        if req.stream:
-            now = int(time())
-            msg_id = body['id']
-            text = result.get('text', '')
-            reasoning = result.get('reasoning', '')
-            tool_calls = result.get('tool_calls')
-            finish_reason = result.get('finish_reason', 'stop')
-
-            async def stream():
-                chunk_data = build_stream_chunk(msg_id, now, model, {'role': 'assistant', 'content': ''})
-                yield f'data: {_json.dumps(chunk_data)}\n\n'
-                if reasoning:
-                    chunk_data = build_stream_chunk(msg_id, now, model, {'reasoning_content': reasoning})
-                    yield f'data: {_json.dumps(chunk_data)}\n\n'
-                if tool_calls:
-                    chunk_data = build_stream_chunk(msg_id, now, model, {'tool_calls': tool_calls})
-                    yield f'data: {_json.dumps(chunk_data)}\n\n'
-                if text:
-                    chunk_data = build_stream_chunk(msg_id, now, model, {'content': text})
-                    yield f'data: {_json.dumps(chunk_data)}\n\n'
-                chunk_data = build_stream_chunk(msg_id, now, model, {}, finish_reason)
-                yield f'data: {_json.dumps(chunk_data)}\n\n'
-                yield 'data: [DONE]\n\n'
-
-            return StreamingResponse(stream(), media_type='text/event-stream')
 
         return body
 
