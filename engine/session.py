@@ -1,12 +1,18 @@
 from json import loads as _loads
+from typing import Generator, Optional
 
 from wrapper import ChatGPT as _BaseChatGPT
 
 
 def _clean_markers(text):
+    if not text:
+        return text
     while '\ue200' in text:
         start = text.index('\ue200')
-        sep = text.index('\ue202', start)
+        try:
+            sep = text.index('\ue202', start)
+        except ValueError:
+            break
         try:
             end = text.index('\ue201', sep + 1)
         except ValueError:
@@ -71,7 +77,10 @@ class ChatGPT(_BaseChatGPT):
             if data_str == '[DONE]':
                 break
 
-            data = _loads(data_str)
+            try:
+                data = _loads(data_str)
+            except Exception:
+                continue
             if not isinstance(data, dict):
                 continue
 
@@ -149,6 +158,18 @@ class ChatGPT(_BaseChatGPT):
 
         return _clean_markers(''.join(parts))
 
+    def _extract_reasoning(self, text: str):
+        reasoning_text = ''
+        if '  ' in text:
+            end = text.find('  ')
+            if end >= 3:
+                reasoning_text = text[3:end]
+                text = text[end + 3:]
+            else:
+                reasoning_text = text[:end]
+                text = text[end + 2:]
+        return text, reasoning_text
+
     def converse(self, message: str, image: str = None,
                  conversation_id: str = None, parent_message_id: str = None,
                  model: str = None, tools: list = None,
@@ -167,6 +188,8 @@ class ChatGPT(_BaseChatGPT):
                 kwargs['json']['tools'] = tools
             if tool_choice and 'json' in kwargs:
                 kwargs['json']['tool_choice'] = tool_choice
+            if 'timeout' not in kwargs:
+                kwargs['timeout'] = 30
             return original_post(url, **kwargs)
         self.session.post = _patched_post
 
@@ -186,18 +209,14 @@ class ChatGPT(_BaseChatGPT):
         parent_id = self.data.get('parent_message_id') or self.parent_message_id
 
         text = self.response
-        reasoning_text = ''
 
-        # Check if response is a tool call (no text content)
         tool_calls = getattr(self, '_tool_calls', None)
-        if tool_calls and not text.strip():
+        if tool_calls and not (text and text.strip()):
             finish_reason = 'tool_calls'
+            reasoning_text = ''
         else:
             finish_reason = 'stop'
-            if '  ' in text:
-                end = text.find('  ')
-                reasoning_text = text[3:end]
-                text = text[end + 3:]
+            text, reasoning_text = self._extract_reasoning(text)
 
         return {
             'text': text,
@@ -246,11 +265,15 @@ class ChatGPT(_BaseChatGPT):
             self.data['proofofwork']['difficulty'],
             self.data['config']
         )
+        if not proof_token:
+            raise RuntimeError("Failed to solve POW for tool results")
         turnstile_token = VM.get_turnstile(
             self.data['bytecode'],
             self.data['vm_token'],
             str(self.ip_info[:-1])
         )
+
+        tz_name = self.ip_info[5] if len(self.ip_info) > 5 else 'UTC'
 
         self.session.headers = Headers.CONVERSATION
         self.session.headers.update({
@@ -280,7 +303,7 @@ class ChatGPT(_BaseChatGPT):
             'parent_message_id': parent_message_id,
             'model': 'auto',
             'timezone_offset_min': self.timezone_offset,
-            'timezone': self.ip_info[5],
+            'timezone': tz_name,
             'history_and_training_disabled': True,
             'conversation_mode': {'kind': 'primary_assistant'},
             'enable_message_followups': True,
@@ -298,7 +321,7 @@ class ChatGPT(_BaseChatGPT):
             },
         }
 
-        r = self.session.post('https://chatgpt.com/backend-anon/f/conversation', json=payload)
+        r = self.session.post('https://chatgpt.com/backend-anon/f/conversation', json=payload, timeout=30)
         self.session.cookies.update(r.cookies)
         if 'Unusual activity' in r.text:
             Log.Error('IP flagged by ChatGPT')
@@ -333,11 +356,15 @@ class ChatGPT(_BaseChatGPT):
             self.data['proofofwork']['difficulty'],
             self.data['config']
         )
+        if not proof_token:
+            raise RuntimeError("Failed to solve POW for follow-up")
         turnstile_token = VM.get_turnstile(
             self.data['bytecode'],
             self.data['vm_token'],
             str(self.ip_info[:-1])
         )
+
+        tz_name = self.ip_info[5] if len(self.ip_info) > 5 else 'UTC'
 
         self.session.headers = Headers.CONVERSATION
         self.session.headers.update({
@@ -363,7 +390,7 @@ class ChatGPT(_BaseChatGPT):
             'parent_message_id': parent_message_id,
             'model': 'auto',
             'timezone_offset_min': self.timezone_offset,
-            'timezone': self.ip_info[5],
+            'timezone': tz_name,
             'history_and_training_disabled': True,
             'conversation_mode': {'kind': 'primary_assistant'},
             'enable_message_followups': True,
@@ -381,7 +408,7 @@ class ChatGPT(_BaseChatGPT):
             },
         }
 
-        r = self.session.post('https://chatgpt.com/backend-anon/f/conversation', json=payload)
+        r = self.session.post('https://chatgpt.com/backend-anon/f/conversation', json=payload, timeout=30)
         self.session.cookies.update(r.cookies)
 
         if 'Unusual activity' in r.text:

@@ -8,7 +8,7 @@ class Challenges:
 
     @staticmethod
     def encode(e):
-        e = dumps(e, separators=(",", ":")) 
+        e = dumps(e, separators=(",", ":"))
         encoded = e.encode("utf-8")
         return b64encode(encoded).decode()
 
@@ -23,7 +23,7 @@ class Challenges:
         except Exception as e:
             t = Challenges.encode(str(e))
         return "error_" + t
-    
+
     @staticmethod
     def mod(e: str) -> str:
         t = 2166136261
@@ -57,3 +57,4 @@ class Challenges:
             a = Challenges._runCheck(t0, t, n, i, config)
             if a:
                 return "gAAAAAB" + a
+        return None

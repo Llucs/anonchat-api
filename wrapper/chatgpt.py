@@ -22,27 +22,31 @@ from datetime     import datetime
 from uuid         import uuid4
 from json         import loads
 from time         import time
-from typing       import Any
+from typing       import Any, Generator, Optional
 from base64       import b64decode
 from io import BytesIO
 
+REQUEST_TIMEOUT = 30
+
 
 class ChatGPT:
-    
-    
+
     def __init__(self, proxy: str=None, cookies: dict = None) -> Any:
-        self.session: requests.session.Session = requests.Session(impersonate="chrome133a")
+        self.session: requests.session.Session = requests.Session(impersonate="chrome134")
         self.session.headers = Headers.DEFAULT
         self.data: dict = {}
-        
+
         if proxy:
-            
             self.session.proxies = {
-                "all": proxy # format http://user:pass@ip:port
+                "all": proxy
             }
-            
+
         self.ip_info: list = IP_Info.fetch_info(self.session)
-        self.timezone_offset: int = int(datetime.now(_get_tz(self.ip_info[5])).utcoffset().total_seconds() / 60)
+        tz_name = self.ip_info[5] if len(self.ip_info) > 5 else 'UTC'
+        try:
+            self.timezone_offset: int = int(datetime.now(_get_tz(tz_name)).utcoffset().total_seconds() / 60)
+        except Exception:
+            self.timezone_offset: int = 0
         self.reacts: list = [
             "location",
             "__reactContainer$" + self._generate_react(),
@@ -305,14 +309,14 @@ class ChatGPT:
             "MotionIsMounted",
             "_oaiHandleSessionExpired"
         ]
-        
+
         if not cookies:
             self._fetch_cookies()
         else:
             self.session.cookies.update(cookies)
-            
+
     def _generate_react(self) -> str:
-        n = random() 
+        n = random()
         base36 = ''
         chars = '0123456789abcdefghijklmnopqrstuvwxyz'
         x = int(n * 36**10)
@@ -320,54 +324,63 @@ class ChatGPT:
             x, r = divmod(x, 36)
             base36 = chars[r] + base36
         return base36
-    
+
     def _parse_event_stream(self, stream_data: str) -> str:
         result: list = []
         lines: list = stream_data.strip().split('\n')
-        
+
         for line in lines:
             if line.startswith('data:'):
-                
+
                 data_str: str = line[5:].strip()
-                
+
                 if data_str == '[DONE]':
                     break
-                
-                data: dict = loads(data_str)
-                
+
+                try:
+                    data: dict = loads(data_str)
+                except Exception:
+                    continue
+
                 if isinstance(data, dict):
-                    
+
                     if data.get('o') == 'append' and data.get('p') == '/message/content/parts/0':
-                        
-                        result.append(data.get('v'))
-                        
+
+                        result.append(data.get('v', ''))
+
                     elif data.get('o') == 'patch' and isinstance(data.get('v'), list):
-                        
+
                         for op in data.get('v'):
-                            
+
                             if op.get('o') == 'append' and op.get('p') == '/message/content/parts/0':
-                                
-                                result.append(op.get('v'))
-                                
+
+                                result.append(op.get('v', ''))
+
                     elif 'v' in data and isinstance(data['v'], str):
                         result.append(data['v'])
-                        
+
         return (''.join(result)).replace("\n", "")
-        
+
     def _fetch_cookies(self) -> None:
-        
-        load_site: requests.models.Response = self.session.get("https://chatgpt.com")
+
+        load_site: requests.models.Response = self.session.get("https://chatgpt.com", timeout=REQUEST_TIMEOUT)
         self.session.cookies.update(load_site.cookies)
 
         self.data["prod"] = load_site.text.split('data-build="')[1].split('"')[0]
         self.data["device-id"] = self.session.cookies.get("oai-did")
-        
+
         self.start_time: int = int(time() * 1000)
         self.sid: str = str(uuid4())
-        
+
+        tz_name = self.ip_info[5] if len(self.ip_info) > 5 else 'UTC'
+        try:
+            tz_str = datetime.now(_get_tz(tz_name)).strftime(f"%a %b %d %Y %H:%M:%S GMT%z ({datetime.now(_get_tz(tz_name)).tzname()})")
+        except Exception:
+            tz_str = datetime.now(_tz.utc).strftime("%a %b %d %Y %H:%M:%S GMT+0000 (UTC)")
+
         self.data["config"] = [
             4880,
-            datetime.now(_get_tz(self.ip_info[5])).strftime(f"%a %b %d %Y %H:%M:%S GMT%z ({datetime.now(_get_tz(self.ip_info[5])).tzname()})"),
+            tz_str,
             4294705152,
             random(),
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
@@ -376,7 +389,7 @@ class ChatGPT:
             "de-DE",
             "de-DE,de,en-US,en",
             random(),
-            "webkitGetUserMedia−function webkitGetUserMedia() { [native code] }",
+            "webkitGetUserMedia\u2212function webkitGetUserMedia() { [native code] }",
             choice(self.reacts),
             choice(self.window_keys),
             randint(800, 1400) + random(),
@@ -385,21 +398,27 @@ class ChatGPT:
             20,
             self.start_time
         ]
-    
+
     def _get_tokens(self, process_time: int=randint(1400, 2000)) -> None:
-        
+
         self.session.headers = Headers.REQUIREMENTS
         self.session.headers.update({
             'oai-client-version': self.data["prod"],
             'oai-device-id': self.data["device-id"],
         })
-        
+
         p_value: str = Challenges.generate_token(self.data["config"])
         self.data["vm_token"] = p_value
-        
+
+        tz_name = self.ip_info[5] if len(self.ip_info) > 5 else 'UTC'
+        try:
+            tz_str = datetime.now(_get_tz(tz_name)).strftime(f"%a %b %d %Y %H:%M:%S GMT%z ({datetime.now(_get_tz(tz_name)).tzname()})")
+        except Exception:
+            tz_str = datetime.now(_tz.utc).strftime("%a %b %d %Y %H:%M:%S GMT+0000 (UTC)")
+
         self.data["config"] = [
             4880,
-            datetime.now(_get_tz(self.ip_info[5])).strftime(f"%a %b %d %Y %H:%M:%S GMT%z ({datetime.now(_get_tz(self.ip_info[5])).tzname()})"),
+            tz_str,
             4294705152,
             random(),
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
@@ -408,7 +427,7 @@ class ChatGPT:
             "de-DE",
             "de-DE,de,en-US,en",
             random(),
-            "webkitGetUserMedia−function webkitGetUserMedia() { [native code] }",
+            "webkitGetUserMedia\u2212function webkitGetUserMedia() { [native code] }",
             choice(self.reacts),
             choice(self.window_keys),
             process_time + random(),
@@ -417,28 +436,34 @@ class ChatGPT:
             20,
             self.start_time
         ]
-        
+
         requirements_data: dict = {
             'p': p_value,
         }
-        
-        requirements_request: requests.models.Response = self.session.post('https://chatgpt.com/backend-anon/sentinel/chat-requirements', json=requirements_data)
+
+        requirements_request: requests.models.Response = self.session.post('https://chatgpt.com/backend-anon/sentinel/chat-requirements', json=requirements_data, timeout=REQUEST_TIMEOUT)
 
         if requirements_request.status_code == 200:
-            self.data["token"] = requirements_request.json().get("token")
-            self.data["proofofwork"] = requirements_request.json().get("proofofwork")
-            self.data["bytecode"] = requirements_request.json().get("turnstile").get("dx")
-        
+            resp_json = requirements_request.json()
+            self.data["token"] = resp_json.get("token")
+            self.data["proofofwork"] = resp_json.get("proofofwork")
+            turnstile = resp_json.get("turnstile", {})
+            self.data["bytecode"] = turnstile.get("dx")
+
+            if not self.data.get("token") or not self.data.get("proofofwork") or not self.data.get("bytecode"):
+                raise RuntimeError("Failed to get chat requirements: incomplete response from server")
         else:
-            Log.Error("Something went wrong while fetching chat requirements")
-    
+            raise RuntimeError(f"Failed to get chat requirements: HTTP {requirements_request.status_code}")
+
     def get_conduit(self, next: bool = False) -> str:
         self.session.headers = Headers.CONDUIT
         self.session.headers.update({
             'oai-client-version': self.data["prod"],
             'oai-device-id': self.data["device-id"],
         })
-        
+
+        tz_name = self.ip_info[5] if len(self.ip_info) > 5 else 'UTC'
+
         if not next:
             post_data: dict = {
                 'action': 'next',
@@ -446,7 +471,7 @@ class ChatGPT:
                 'parent_message_id': 'client-created-root',
                 'model': 'auto',
                 'timezone_offset_min': self.timezone_offset,
-                'timezone': self.ip_info[5],
+                'timezone': tz_name,
                 'history_and_training_disabled': True,
                 'conversation_mode': {
                     'kind': 'primary_assistant',
@@ -457,16 +482,16 @@ class ChatGPT:
                     'v1',
                 ],
             }
-        
+
         else:
             post_data: dict = {
                 'action': 'next',
                 'fork_from_shared_post': False,
-                'conversation_id': self.data["conversation_id"],
-                'parent_message_id': self.data["parent_message_id"],
+                'conversation_id': self.data.get("conversation_id", ""),
+                'parent_message_id': self.data.get("parent_message_id", ""),
                 'model': 'auto',
                 'timezone_offset_min': self.timezone_offset,
-                'timezone': self.ip_info[5],
+                'timezone': tz_name,
                 'history_and_training_disabled': True,
                 'conversation_mode': {
                     'kind': 'primary_assistant',
@@ -477,26 +502,29 @@ class ChatGPT:
                     'v1',
                 ],
             }
-                    
-        conduit_request: requests.models.Response = self.session.post('https://chatgpt.com/backend-anon/f/conversation/prepare', json=post_data)
-        
+
+        conduit_request: requests.models.Response = self.session.post('https://chatgpt.com/backend-anon/f/conversation/prepare', json=post_data, timeout=REQUEST_TIMEOUT)
+
         if '"status":"ok"' in conduit_request.text:
-            return conduit_request.json().get("conduit_token")
-        
+            return conduit_request.json().get("conduit_token", "")
+
         else:
-            Log.Error("Something went wrong while fetching conduit token: ")
-            Log.Error(conduit_request.text)
-            return None
-    
+            error_text = conduit_request.text[:200]
+            raise RuntimeError(f"Failed to get conduit token: {error_text}")
+
     def start_conversation(self, message: str) -> None:
-        
+
         self._get_tokens()
         conduit_token: str = self.get_conduit()
-        
+
         time_1: int = randint(6000, 9000)
         proof_token: str = Challenges.solve_pow(self.data["proofofwork"]["seed"], self.data["proofofwork"]["difficulty"], self.data["config"])
-        Log.Success(f"Solved POW: {proof_token}")
+        if not proof_token:
+            raise RuntimeError("Failed to solve Proof-of-Work challenge")
+        Log.Success(f"Solved POW: {proof_token[:20]}...")
         turnstile_token: str = VM.get_turnstile(self.data["bytecode"], self.data["vm_token"], str(self.ip_info[:-1]))
+
+        tz_name = self.ip_info[5] if len(self.ip_info) > 5 else 'UTC'
 
         self.session.headers = Headers.CONVERSATION
         self.session.headers.update({
@@ -536,7 +564,7 @@ class ChatGPT:
             'parent_message_id': 'client-created-root',
             'model': 'auto',
             'timezone_offset_min': self.timezone_offset,
-            'timezone': self.ip_info[5],
+            'timezone': tz_name,
             'history_and_training_disabled': True,
             'conversation_mode': {
                 'kind': 'primary_assistant',
@@ -559,35 +587,46 @@ class ChatGPT:
             'paragen_cot_summary_display_override': 'allow',
             'force_parallel_switch': 'auto',
         }
-        
-        conversation_request: requests.models.Response = self.session.post('https://chatgpt.com/backend-anon/f/conversation', json=conversation_data)
+
+        conversation_request: requests.models.Response = self.session.post('https://chatgpt.com/backend-anon/f/conversation', json=conversation_data, timeout=REQUEST_TIMEOUT)
         self.session.cookies.update(conversation_request.cookies)
-        
+
         if 'Unusual activity' in conversation_request.text:
             Log.Error("Your IP got flagged by chatgpt, retry with a new IP")
-            exit(conversation_request.status_code)
-        
-        self.data["conversation_id"] = Utils.between(conversation_request.text, '"conversation_id": "', '"')
-        self.data["parent_message_id"] = Utils.between(conversation_request.text, '"message_id": "', '"')
+            raise SystemExit(conversation_request.status_code)
+
+        try:
+            self.data["conversation_id"] = Utils.between(conversation_request.text, '"conversation_id": "', '"')
+            self.data["parent_message_id"] = Utils.between(conversation_request.text, '"message_id": "', '"')
+        except (IndexError, AttributeError):
+            pass
         self.response = self._parse_event_stream(conversation_request.text)
 
     def upload_image(self, image: str) -> None:
-        
+
         self.session.headers = Headers.REQUIREMENTS
         self.session.headers.update({
             'oai-client-version': self.data["prod"],
             'oai-device-id': self.data["device-id"],
         })
-        
+
         self.file_name: str = str(uuid4())
-        
+
         if image.startswith("data:image"):
             image = image.split(",")[1]
-            
-        self.file_size: int = len(b64decode(image))
+
+        try:
+            raw_image = b64decode(image)
+        except Exception as e:
+            raise ValueError(f"Invalid base64 image data: {e}")
+
+        self.file_size: int = len(raw_image)
+        max_size = 20 * 1024 * 1024
+        if self.file_size > max_size:
+            raise ValueError(f"Image too large: {self.file_size} bytes (max {max_size})")
         from PIL import Image
-        self.width, self.height = Image.open(BytesIO(b64decode(image))).size
-        
+        self.width, self.height = Image.open(BytesIO(raw_image)).size
+
         image_data: dict = {
             'file_name': f'{self.file_name}.png',
             'file_size': self.file_size,
@@ -595,46 +634,50 @@ class ChatGPT:
             'timezone_offset_min': self.timezone_offset,
             'reset_rate_limits': False,
         }
-        file_request: requests.models.Response = self.session.post('https://chatgpt.com/backend-anon/files', json=image_data)
-        
-        self.data["file_id"] = file_request.json().get("file_id")
-        upload_url: str = file_request.json().get("upload_url")
-        
+        file_request: requests.models.Response = self.session.post('https://chatgpt.com/backend-anon/files', json=image_data, timeout=REQUEST_TIMEOUT)
+
+        resp_json = file_request.json()
+        self.data["file_id"] = resp_json.get("file_id")
+        upload_url: str = resp_json.get("upload_url")
+
+        if not self.data.get("file_id") or not upload_url:
+            raise RuntimeError("Failed to get file upload URL from server")
+
         self.session.headers = Headers.FILE
-        upload_request: requests.models.Response = self.session.put(upload_url, data=b64decode(image))
+        upload_request: requests.models.Response = self.session.put(upload_url, data=raw_image, timeout=REQUEST_TIMEOUT)
 
         self.session.headers = Headers.REQUIREMENTS
         self.session.headers.update({
             'oai-client-version': self.data["prod"],
             'oai-device-id': self.data["device-id"],
         })
-        
+
         process_data: dict = {
             'file_id': self.data["file_id"],
             'use_case': 'multimodal',
             'index_for_retrieval': False,
             'file_name': f'{self.file_name}.png',
         }
-        
-        process_request: requests.models.Response = self.session.post('https://chatgpt.com/backend-anon/files/process_upload_stream', json=process_data)
-        
-        if "Succeeded processing " in process_request.text:
-            return
-        else:
+
+        process_request: requests.models.Response = self.session.post('https://chatgpt.com/backend-anon/files/process_upload_stream', json=process_data, timeout=REQUEST_TIMEOUT)
+
+        if "Succeeded processing " not in process_request.text:
             Log.Error("Something went wrong while uploading image")
-        
-        
-        
+
     def start_with_image(self, message: str, image: str) -> None:
-        
+
         self._get_tokens()
         conduit_token: str = self.get_conduit()
         self.upload_image(image)
-        
+
         time_1: int = randint(6000, 9000)
         proof_token: str = Challenges.solve_pow(self.data["proofofwork"]["seed"], self.data["proofofwork"]["difficulty"], self.data["config"])
-        
+        if not proof_token:
+            raise RuntimeError("Failed to solve Proof-of-Work for image conversation")
+
         turnstile_token: str = VM.get_turnstile(self.data["bytecode"], self.data["vm_token"], str(self.ip_info[:-1]))
+
+        tz_name = self.ip_info[5] if len(self.ip_info) > 5 else 'UTC'
 
         self.session.headers = Headers.CONVERSATION
         self.session.headers.update({
@@ -692,7 +735,7 @@ class ChatGPT:
             'parent_message_id': 'client-created-root',
             'model': 'auto',
             'timezone_offset_min': self.timezone_offset,
-            'timezone': self.ip_info[5],
+            'timezone': tz_name,
             'history_and_training_disabled': True,
             'conversation_mode': {
                 'kind': 'primary_assistant',
@@ -715,34 +758,40 @@ class ChatGPT:
             'paragen_cot_summary_display_override': 'allow',
             'force_parallel_switch': 'auto',
         }
-        
-        conversation_request: requests.models.Response = self.session.post('https://chatgpt.com/backend-anon/f/conversation', json=conversation_data)
+
+        conversation_request: requests.models.Response = self.session.post('https://chatgpt.com/backend-anon/f/conversation', json=conversation_data, timeout=REQUEST_TIMEOUT)
         self.session.cookies.update(conversation_request.cookies)
-        
+
         if 'Unusual activity' in conversation_request.text:
             Log.Error("Your IP got flagged by chatgpt, retry with a new IP")
-            exit(conversation_request.status_code)
-        
-        self.data["conversation_id"] = Utils.between(conversation_request.text, '"conversation_id": "', '"')
-        self.data["parent_message_id"] = Utils.between(conversation_request.text, '"message_id": "', '"')
+            raise SystemExit(conversation_request.status_code)
+
+        try:
+            self.data["conversation_id"] = Utils.between(conversation_request.text, '"conversation_id": "', '"')
+            self.data["parent_message_id"] = Utils.between(conversation_request.text, '"message_id": "', '"')
+        except (IndexError, AttributeError):
+            pass
         self.response = self._parse_event_stream(conversation_request.text)
-    
+
     def hold_conversation(self, message: str, new: bool = True) -> None:
         self.index = 2000
-        
+
         if new:
             self.start_conversation(message)
-        
+
         conduit_token: str = self.get_conduit(next=True)
-        
+
         self._get_tokens(randint(self.index, self.index + 1000))
         self.index += 3000
-        
+
         time_1: int = randint(self.index, self.index + 3000)
         proof_token: str = Challenges.solve_pow(self.data["proofofwork"]["seed"], self.data["proofofwork"]["difficulty"], self.data["config"])
-        
+        if not proof_token:
+            raise RuntimeError("Failed to solve Proof-of-Work for follow-up")
+
         turnstile_token: str = VM.get_turnstile(self.data["bytecode"], self.data["vm_token"], str(self.ip_info[:-1]))
 
+        tz_name = self.ip_info[5] if len(self.ip_info) > 5 else 'UTC'
 
         self.session.headers = Headers.CONVERSATION
         self.session.headers.update({
@@ -754,12 +803,12 @@ class ChatGPT:
             'openai-sentinel-turnstile-token': turnstile_token,
             'x-conduit-token': conduit_token,
         })
-        
+
         if new:
             new_message: str = input("Prompt: ")
         else:
             new_message: str = message
-        
+
         conversation_data: dict = {
             'action': 'next',
             'messages': [
@@ -784,11 +833,11 @@ class ChatGPT:
                     },
                 },
             ],
-            'conversation_id': self.data["conversation_id"],
-            'parent_message_id': self.data["parent_message_id"],
+            'conversation_id': self.data.get("conversation_id", ""),
+            'parent_message_id': self.data.get("parent_message_id", ""),
             'model': 'auto',
             'timezone_offset_min': self.timezone_offset,
-            'timezone': self.ip_info[5],
+            'timezone': tz_name,
             'history_and_training_disabled': True,
             'conversation_mode': {
                 'kind': 'primary_assistant',
@@ -811,24 +860,27 @@ class ChatGPT:
             'paragen_cot_summary_display_override': 'allow',
             'force_parallel_switch': 'auto',
         }
-        
-        conversation_request: requests.models.Response = self.session.post('https://chatgpt.com/backend-anon/f/conversation', json=conversation_data)
+
+        conversation_request: requests.models.Response = self.session.post('https://chatgpt.com/backend-anon/f/conversation', json=conversation_data, timeout=REQUEST_TIMEOUT)
         self.session.cookies.update(conversation_request.cookies)
-        
+
         if 'Unusual activity' in conversation_request.text:
             Log.Error("Your IP got flagged by chatgpt, retry with a new IP")
-            exit(conversation_request.status_code)
-        
-        self.data["conversation_id"] = Utils.between(conversation_request.text, '"conversation_id": "', '"')
-        self.data["parent_message_id"] = Utils.between(conversation_request.text, '"message_id": "', '"')
-        
+            raise SystemExit(conversation_request.status_code)
+
+        try:
+            self.data["conversation_id"] = Utils.between(conversation_request.text, '"conversation_id": "', '"')
+            self.data["parent_message_id"] = Utils.between(conversation_request.text, '"message_id": "', '"')
+        except (IndexError, AttributeError):
+            pass
+
         self.response = self._parse_event_stream(conversation_request.text)
-    
+
     def ask_question(self, message: str, image: str = None) -> str:
-        
+
         if not image:
             self.start_conversation(message)
         else:
             self.start_with_image(message, image)
-        
+
         return self.response

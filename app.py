@@ -2,8 +2,10 @@ import json as _json
 import logging
 from time import time
 from uuid import uuid4
+from typing import Optional
 
 from engine.session import ChatGPT
+from engine.response import build_chat_response, build_stream_chunk
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger('anonchat')
@@ -21,8 +23,9 @@ except ImportError:
         return max(1, len(s) // 4)
 
 try:
-    from fastapi import FastAPI, HTTPException
-    from fastapi.responses import StreamingResponse
+    from fastapi import FastAPI
+    from fastapi.responses import StreamingResponse, JSONResponse
+    from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel
     from uvicorn import run
     _has_server = True
@@ -40,6 +43,9 @@ if _has_server:
     class ToolDef(BaseModel):
         type: str = 'function'
         function: dict
+
+    class ResponseFormat(BaseModel):
+        type: str = 'text'
 
     class ChatRequest(BaseModel):
         messages: list[Message]
@@ -61,19 +67,45 @@ if _has_server:
         image: str | None = None
         tools: list[ToolDef] | None = None
         tool_choice: str | None = None
+        response_format: ResponseFormat | None = None
         extended: bool = False
 
     app = FastAPI(title='anonchat-api', version='1.0.0')
 
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=['*'],
+        allow_credentials=True,
+        allow_methods=['*'],
+        allow_headers=['*'],
+    )
+
     @app.post('/v1/chat/completions')
     async def chat_completions(req: ChatRequest):
+        if not req.messages:
+            return JSONResponse(content={'error': {'message': 'messages is required', 'type': 'invalid_request_error', 'code': 'invalid_request_error', 'param': None}}, status_code=400)
+
         last_msg = next((m for m in reversed(req.messages) if m.role == 'user'), None)
         if not last_msg:
-            raise HTTPException(400, 'No user message found')
+            return JSONResponse(content={'error': {'message': 'No user message found', 'type': 'invalid_request_error', 'code': 'invalid_request_error', 'param': None}}, status_code=400)
 
-        prompt_text = '\n'.join(f'{m.role}: {m.content or ""}' for m in req.messages)
+        system_msg = next((m for m in req.messages if m.role == 'system'), None)
+        system_prompt = system_msg.content if system_msg else None
 
-        # Find tool_result messages (role='tool')
+        prompt_parts = []
+        for m in req.messages:
+            role = m.role
+            content = m.content or ''
+            if role == 'system':
+                prompt_parts.append(f'system: {content}')
+            elif role == 'user':
+                prompt_parts.append(f'user: {content}')
+            elif role == 'assistant':
+                prompt_parts.append(f'assistant: {content}')
+            elif role == 'tool':
+                prompt_parts.append(f'tool ({m.tool_call_id}): {content}')
+        prompt_text = '\n'.join(prompt_parts)
+
         tool_results = []
         conv_id = req.conversation_id
         parent_id = req.parent_message_id
@@ -91,9 +123,21 @@ if _has_server:
 
             tools_list = [t.model_dump() for t in req.tools] if req.tools else None
 
+            if system_prompt and not req.conversation_id:
+                message_text = f"[System: {system_prompt}]\n\n{last_msg.content or ''}"
+            else:
+                message_text = last_msg.content or ''
+
+            image_param = None
+            if image:
+                if image.startswith('data:image') or not image.startswith('http'):
+                    image_param = image
+                else:
+                    image_param = image
+
             result = client.converse(
-                message=last_msg.content or '',
-                image=image if (image and image.startswith('data:image') or (image and not image.startswith('http'))) else None,
+                message=message_text,
+                image=image_param,
                 conversation_id=conv_id,
                 parent_message_id=parent_id,
                 model=requested_model,
@@ -102,13 +146,16 @@ if _has_server:
                 tool_choice=req.tool_choice,
             )
         except SystemExit:
-            raise HTTPException(502, 'IP flagged by ChatGPT')
+            return JSONResponse(content={'error': {'message': 'IP flagged by ChatGPT. Use a different IP or proxy.', 'type': 'ip_flagged', 'code': 'ip_flagged', 'param': None}}, status_code=502)
+        except RuntimeError as e:
+            logger.warning(f'Runtime error: {e}')
+            return JSONResponse(content={'error': {'message': str(e), 'type': 'upstream_error', 'code': 'upstream_error', 'param': None}}, status_code=502)
         except Exception as e:
             logger.exception('chat failed')
-            raise HTTPException(500, str(e))
+            return JSONResponse(content={'error': {'message': 'An internal error occurred', 'type': 'server_error', 'code': 'server_error', 'param': None}}, status_code=500)
 
         if result.get('error'):
-            raise HTTPException(413, result['message'])
+            return JSONResponse(content={'error': {'message': result.get('message', 'Unknown error'), 'type': 'upstream_error', 'code': 'upstream_error', 'param': None}}, status_code=413)
 
         model = result['model'] or req.model
         if model:
@@ -121,72 +168,33 @@ if _has_server:
         if result.get('rate_limits'):
             _global_rate_limits = result['rate_limits']
 
-        now = int(time())
-        msg_id = f'chatcmpl-{uuid4().hex[:16]}'
-        text = result.get('text', '')
-        reasoning = result.get('reasoning', '')
-        citations = result.get('citations')
-        content_refs = result.get('content_references')
-        tool_calls = result.get('tool_calls')
-        finish_reason = result.get('finish_reason', 'stop')
+        body = build_chat_response(result, prompt_text, model, extended=req.extended)
 
-        pt = _count(prompt_text)
-        ct = _count(text)
-        rt = _count(reasoning) if reasoning else 0
-
-        choice_msg = {'role': 'assistant', 'content': text}
-        if rt:
-            choice_msg['reasoning_content'] = reasoning
-        if citations:
-            choice_msg['citations'] = citations
-        if content_refs:
-            choice_msg['content_references'] = content_refs
-        if tool_calls:
-            choice_msg['tool_calls'] = tool_calls
-            if not text:
-                choice_msg['content'] = None
-
-        choices = [{
-            'index': 0,
-            'message': choice_msg,
-            'finish_reason': finish_reason,
-        }]
-
-        usage = {'prompt_tokens': pt, 'completion_tokens': ct, 'total_tokens': pt + ct}
-        if rt:
-            usage['completion_tokens_details'] = {'reasoning_tokens': rt}
-
-        body = {
-            'id': msg_id,
-            'object': 'chat.completion',
-            'created': now,
-            'model': model,
-            'choices': choices,
-            'usage': usage,
-        }
-
-        if req.extended:
-            for _k in ['conversation_id', 'parent_message_id', 'rate_limits',
-                       'plan_type', 'cluster_region', 'did_reasoning',
-                       'server_ttfvt_ms', 'resume_token']:
-                _v = result.get(_k)
-                if _v:
-                    body[_k] = _v
+        if req.response_format and req.response_format.type == 'json_object':
+            body['choices'][0]['message']['content'] = body['choices'][0]['message']['content']
 
         if req.stream:
+            now = int(time())
+            msg_id = body['id']
+            text = result.get('text', '')
+            reasoning = result.get('reasoning', '')
+            tool_calls = result.get('tool_calls')
+            finish_reason = result.get('finish_reason', 'stop')
+
             async def stream():
-                def chunk(delta, finish=None):
-                    d = {'id': msg_id, 'object': 'chat.completion.chunk', 'created': now, 'model': model,
-                         'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}]}
-                    return f'data: {_json.dumps(d)}\n\n'
-                yield chunk({'role': 'assistant', 'content': ''})
+                chunk_data = build_stream_chunk(msg_id, now, model, {'role': 'assistant', 'content': ''})
+                yield f'data: {_json.dumps(chunk_data)}\n\n'
                 if reasoning:
-                    yield chunk({'reasoning_content': reasoning})
+                    chunk_data = build_stream_chunk(msg_id, now, model, {'reasoning_content': reasoning})
+                    yield f'data: {_json.dumps(chunk_data)}\n\n'
                 if tool_calls:
-                    yield chunk({'tool_calls': tool_calls})
+                    chunk_data = build_stream_chunk(msg_id, now, model, {'tool_calls': tool_calls})
+                    yield f'data: {_json.dumps(chunk_data)}\n\n'
                 if text:
-                    yield chunk({'content': text})
-                yield chunk({}, finish=finish_reason)
+                    chunk_data = build_stream_chunk(msg_id, now, model, {'content': text})
+                    yield f'data: {_json.dumps(chunk_data)}\n\n'
+                chunk_data = build_stream_chunk(msg_id, now, model, {}, finish_reason)
+                yield f'data: {_json.dumps(chunk_data)}\n\n'
                 yield 'data: [DONE]\n\n'
 
             return StreamingResponse(stream(), media_type='text/event-stream')
@@ -195,7 +203,19 @@ if _has_server:
 
     @app.get('/health')
     async def health():
-        return {'status': 'ok'}
+        status = 'ok'
+        try:
+            import curl_cffi
+            client = ChatGPT()
+            status = 'ok'
+        except Exception as e:
+            logger.warning(f'Health check: {e}')
+            status = 'degraded'
+        return {
+            'status': status,
+            'version': '1.0.0',
+            'models_known': len(_known_models),
+        }
 
     @app.get('/v1/models')
     async def list_models(refresh: bool = False):

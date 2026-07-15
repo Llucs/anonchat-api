@@ -5,6 +5,7 @@ from time import time
 from uuid import uuid4
 
 from engine.session import ChatGPT
+from engine.response import build_chat_response, _count
 
 try:
     import tiktoken
@@ -14,52 +15,6 @@ try:
 except ImportError:
     def _count(s):
         return max(1, len(s) // 4)
-
-
-def _build_openai_response(result, prompt_text, extended=False):
-    model = result.get('model') or 'auto'
-    text = result.get('text', '')
-    now = int(time())
-    msg_id = f'chatcmpl-{uuid4().hex[:16]}'
-
-    reasoning = result.get('reasoning', '')
-    citations = result.get('citations')
-    content_refs = result.get('content_references')
-
-    pt = _count(prompt_text)
-    ct = _count(text)
-    rt = _count(reasoning) if reasoning else 0
-
-    choice_msg = {'role': 'assistant', 'content': text}
-    if rt:
-        choice_msg['reasoning_content'] = reasoning
-    if citations:
-        choice_msg['citations'] = citations
-    if content_refs:
-        choice_msg['content_references'] = content_refs
-
-    usage = {'prompt_tokens': pt, 'completion_tokens': ct, 'total_tokens': pt + ct}
-    if rt:
-        usage['completion_tokens_details'] = {'reasoning_tokens': rt}
-
-    body = {
-        'id': msg_id,
-        'object': 'chat.completion',
-        'created': now,
-        'model': model,
-        'choices': [{'index': 0, 'message': choice_msg, 'finish_reason': 'stop'}],
-        'usage': usage,
-    }
-
-    if extended:
-        for _k in ['conversation_id', 'parent_message_id', 'rate_limits',
-                   'plan_type', 'cluster_region', 'did_reasoning',
-                   'server_ttfvt_ms', 'resume_token']:
-            _v = result.get(_k)
-            if _v:
-                body[_k] = _v
-
-    return body
 
 
 def main():
@@ -115,6 +70,9 @@ def main():
         from uuid import uuid4 as _uuid4
         proof = Challenges.solve_pow(client.data['proofofwork']['seed'],
             client.data['proofofwork']['difficulty'], client.data['config'])
+        if not proof:
+            print('error: failed to solve POW', file=sys.stderr)
+            sys.exit(2)
         turnstile = VM.get_turnstile(client.data['bytecode'],
             client.data['vm_token'], str(client.ip_info[:-1]))
         client.session.headers = Headers.CONVERSATION.copy()
@@ -124,13 +82,14 @@ def main():
             'openai-sentinel-proof-token': proof, 'openai-sentinel-turnstile-token': turnstile,
             'x-conduit-token': conduit,
         })
+        tz_name = client.ip_info[5] if len(client.ip_info) > 5 else 'UTC'
         payload = {
             'action': 'next',
             'messages': [{'id': str(_uuid4()), 'author': {'role': 'user'},
                 'create_time': _time.time(), 'content': {'content_type': 'text', 'parts': ['hi']},
                 'metadata': {}}],
             'parent_message_id': 'client-created-root', 'model': 'auto',
-            'timezone_offset_min': client.timezone_offset, 'timezone': client.ip_info[5],
+            'timezone_offset_min': client.timezone_offset, 'timezone': tz_name,
             'history_and_training_disabled': True, 'conversation_mode': {'kind': 'primary_assistant'},
             'supports_buffering': True, 'supported_encodings': ['v1'],
         }
@@ -179,7 +138,7 @@ def main():
 
     if args.json:
         prompt_text = f'user: {text}'
-        resp = _build_openai_response(result, prompt_text, extended=args.extended)
+        resp = build_chat_response(result, prompt_text, result.get('model', 'auto'), extended=args.extended)
         print(_json.dumps(resp, indent=2, ensure_ascii=False))
         return
 

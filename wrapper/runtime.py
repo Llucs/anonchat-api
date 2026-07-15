@@ -4,39 +4,25 @@ from functools import wraps
 
 
 class Run:
-    """
-    Class to handle runtime
-    """
-    
+
     @staticmethod
     def Error(func: Callable[..., Any]) -> Callable[..., Any]:
-        """
-        Error function to catch errors
-        
-        @param func: The function to wrap.
-        @return:     Custom error message
-        """
         @wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             try:
                 return func(*args, **kwargs)
             except Exception as e:
                 Run.handle_error(e)
-                return None 
+                return None
         return wrapper
 
     @staticmethod
-    def handle_error(exception: Exception) -> Optional[None]:
-        """
-        Handling an error
-        
-        @param exception: Exception that occured
-        """
+    def handle_error(exception: Exception) -> None:
         Log.Error(f"Error occurred: {exception}")
-        exit()
-        
+        exit(1)
+
 class Utils:
-    
+
     @staticmethod
     def between(
         main_text: Optional[str],

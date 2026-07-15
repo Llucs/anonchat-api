@@ -1,13 +1,7 @@
 curl_cffi>=0.15.0
 esprima>=4.0.1
-
-# Optional: for the HTTP server (app.py)
-# fastapi>=0.100.0
-# uvicorn>=0.20.0
-# pydantic>=2.0.0
-
-# Optional: accurate token counting
-# tiktoken>=0.5.0
-
-# Optional: image upload support
-# Pillow>=10.0
+fastapi>=0.100.0
+uvicorn>=0.20.0
+pydantic>=2.0.0
+tiktoken>=0.5.0
+Pillow>=10.0

@@ -26,13 +26,13 @@ class Log:
             print(log_message)
 
     @staticmethod
-    def Success(message, prefix="[+]", color=None):
+    def Success(message, prefix="[+]"):
         Log._log("SUCCESS", f"{Log.colours['SUCCESS']}{prefix}\033[0m", message)
 
     @staticmethod
-    def Error(message, prefix="[!]", color=None):
+    def Error(message, prefix="[!]"):
         Log._log("ERROR", f"{Log.colours['ERROR']}{prefix}\033[0m", message)
 
     @staticmethod
-    def Info(message, prefix="[!]", color=None):
+    def Info(message, prefix="[!]"):
         Log._log("INFO", f"{Log.colours['INFO']}{prefix}\033[0m", message)
