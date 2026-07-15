@@ -1,6 +1,22 @@
 from wrapper      import Log, Utils, Headers, Challenges, VM, IP_Info
 from random       import randint, random, choice
-from zoneinfo     import ZoneInfo
+from datetime    import timezone as _tz
+
+try:
+    from zoneinfo import ZoneInfo
+    def _get_tz(name):
+        try:
+            return ZoneInfo(name)
+        except (KeyError, TypeError):
+            pass
+        try:
+            return ZoneInfo('UTC')
+        except (KeyError, TypeError):
+            pass
+        return _tz.utc
+except ImportError:
+    def _get_tz(_name=None):
+        return _tz.utc
 from curl_cffi    import requests
 from datetime     import datetime
 from uuid         import uuid4
@@ -26,7 +42,7 @@ class ChatGPT:
             }
             
         self.ip_info: list = IP_Info.fetch_info(self.session)
-        self.timezone_offset: int = int(datetime.now(ZoneInfo(self.ip_info[5])).utcoffset().total_seconds() / 60)
+        self.timezone_offset: int = int(datetime.now(_get_tz(self.ip_info[5])).utcoffset().total_seconds() / 60)
         self.reacts: list = [
             "location",
             "__reactContainer$" + self._generate_react(),
@@ -351,7 +367,7 @@ class ChatGPT:
         
         self.data["config"] = [
             4880,
-            datetime.now(ZoneInfo(self.ip_info[5])).strftime(f"%a %b %d %Y %H:%M:%S GMT%z ({datetime.now(ZoneInfo(self.ip_info[5])).tzname()})"),
+            datetime.now(_get_tz(self.ip_info[5])).strftime(f"%a %b %d %Y %H:%M:%S GMT%z ({datetime.now(_get_tz(self.ip_info[5])).tzname()})"),
             4294705152,
             random(),
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
@@ -383,7 +399,7 @@ class ChatGPT:
         
         self.data["config"] = [
             4880,
-            datetime.now(ZoneInfo(self.ip_info[5])).strftime(f"%a %b %d %Y %H:%M:%S GMT%z ({datetime.now(ZoneInfo(self.ip_info[5])).tzname()})"),
+            datetime.now(_get_tz(self.ip_info[5])).strftime(f"%a %b %d %Y %H:%M:%S GMT%z ({datetime.now(_get_tz(self.ip_info[5])).tzname()})"),
             4294705152,
             random(),
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
