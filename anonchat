@@ -16,7 +16,7 @@ except ImportError:
         return max(1, len(s) // 4)
 
 
-def _build_openai_response(result, prompt_text):
+def _build_openai_response(result, prompt_text, extended=False):
     model = result.get('model') or 'auto'
     text = result.get('text', '')
     now = int(time())
@@ -51,20 +51,13 @@ def _build_openai_response(result, prompt_text):
         'usage': usage,
     }
 
-    if result.get('conversation_id'):
-        body['conversation_id'] = result['conversation_id']
-    if result.get('parent_message_id'):
-        body['parent_message_id'] = result['parent_message_id']
-    if result.get('rate_limits'):
-        body['rate_limits'] = result['rate_limits']
-    if result.get('resume_token'):
-        body['resume_token'] = result['resume_token']
-    if result.get('plan_type'):
-        body['plan_type'] = result['plan_type']
-    if result.get('cluster_region'):
-        body['cluster_region'] = result['cluster_region']
-    if result.get('did_reasoning'):
-        body['did_reasoning'] = True
+    if extended:
+        for _k in ['conversation_id', 'parent_message_id', 'rate_limits',
+                   'plan_type', 'cluster_region', 'did_reasoning',
+                   'server_ttfvt_ms', 'resume_token']:
+            _v = result.get(_k)
+            if _v:
+                body[_k] = _v
 
     return body
 
@@ -80,6 +73,7 @@ def main():
     parser.add_argument('--image', help='Image file path or base64 data:image/...')
     parser.add_argument('--conversation-id', help='Resume existing conversation')
     parser.add_argument('--parent-message-id', help='Parent message for follow-up')
+    parser.add_argument('--extended', action='store_true', help='Include extra metadata in JSON output')
 
     args = parser.parse_args()
 
@@ -130,7 +124,7 @@ def main():
 
     if args.json:
         prompt_text = f'user: {text}'
-        resp = _build_openai_response(result, prompt_text)
+        resp = _build_openai_response(result, prompt_text, extended=args.extended)
         print(_json.dumps(resp, indent=2, ensure_ascii=False))
         return
 

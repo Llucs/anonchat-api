@@ -53,6 +53,7 @@ if _has_server:
         conversation_id: str | None = None
         parent_message_id: str | None = None
         image: str | None = None
+        extended: bool = False
 
     app = FastAPI(title='anonchat-api', version='1.0.0')
 
@@ -125,24 +126,13 @@ if _has_server:
             'usage': usage,
         }
 
-        conv_id = result.get('conversation_id')
-        parent_id = result.get('parent_message_id')
-        if conv_id:
-            body['conversation_id'] = conv_id
-        if parent_id:
-            body['parent_message_id'] = parent_id
-        if result.get('rate_limits'):
-            body['rate_limits'] = result['rate_limits']
-        if result.get('plan_type'):
-            body['plan_type'] = result['plan_type']
-        if result.get('cluster_region'):
-            body['cluster_region'] = result['cluster_region']
-        if result.get('did_reasoning'):
-            body['did_reasoning'] = True
-        if result.get('server_ttfvt_ms'):
-            body['server_ttfvt_ms'] = result['server_ttfvt_ms']
-        if result.get('resume_token'):
-            body['resume_token'] = result['resume_token']
+        if req.extended:
+            for _k in ['conversation_id', 'parent_message_id', 'rate_limits',
+                       'plan_type', 'cluster_region', 'did_reasoning',
+                       'server_ttfvt_ms', 'resume_token']:
+                _v = result.get(_k)
+                if _v:
+                    body[_k] = _v
 
         if req.stream:
             async def stream():
