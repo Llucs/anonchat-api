@@ -191,7 +191,10 @@ class ChatGPT(_BaseChatGPT):
                     if op.get('o') == 'append' and op.get('p') == '/message/content/parts/0':
                         parts.append(op.get('v'))
             elif 'v' in data and isinstance(data['v'], str) and seen_assistant:
-                parts.append(data['v'])
+                v = data['v']
+                if len(v) < 30 and v.replace('_', '').isalnum():
+                    continue
+                parts.append(v)
 
         return _clean_markers(''.join(parts))
 
