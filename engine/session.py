@@ -20,6 +20,9 @@ def _clean_markers(text):
         start = text.index('\ue200')
         try:
             sep = text.index('\ue202', start)
+            next_ue200 = text.find('\ue200', start + 1)
+            if next_ue200 != -1 and sep > next_ue200:
+                sep = None
         except ValueError:
             sep = None
         # Search for closing \ue201 but stop at next \ue200
@@ -41,14 +44,12 @@ def _clean_markers(text):
         if end is None:
             after = text[sep + 1:]
             if after.startswith('['):
-                # Truncated entity marker — this is partial JSON data.
-                # Find where the JSON array data transitions back to normal text
-                # by looking for the last "," separator that's near the start.
-                # Everything after that last "," is the content text.
                 last_sep = after.rfind('","', 0, min(len(after), 200))
                 if last_sep != -1:
                     content_start = last_sep + 3
                     text = text[:start] + after[content_start:]
+                elif after.startswith('[["') or after.startswith('["'):
+                    text = text[:start]
                 else:
                     text = text[:start] + after
             else:
