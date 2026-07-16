@@ -20,11 +20,24 @@ def _clean_markers(text):
         try:
             sep = text.index('\ue202', start)
         except ValueError:
-            break
+            sep = None
         try:
-            end = text.index('\ue201', sep + 1)
+            end = text.index('\ue201', (sep if sep else start) + 1)
         except ValueError:
-            break
+            end = None
+        if sep is None and end is None:
+            text = text[:start] + text[start + 1:]
+            continue
+        if sep is None:
+            text = text[:start] + text[end + 1:]
+            continue
+        if end is None:
+            after = text[sep + 1:]
+            if after.startswith('['):
+                text = text[:start]
+            else:
+                text = text[:start] + after
+            continue
         inner = text[sep+1:end]
         replacement = ''
         if inner.startswith('['):
@@ -263,7 +276,7 @@ class ChatGPT(_BaseChatGPT):
 
         try:
             for chunk in self.start_conversation_stream(message):
-                cleaned = _clean_rich_blocks(chunk)
+                cleaned = _clean_markers(chunk)
                 if cleaned:
                     yield {'type': 'chunk', 'text': cleaned}
         except SystemExit:
