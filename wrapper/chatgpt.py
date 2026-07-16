@@ -1013,6 +1013,17 @@ class ChatGPT:
 
         self.response = (''.join(full_text)).replace("\n", "")
 
+    def list_models(self) -> list[dict]:
+        self._fetch_cookies()
+        r = self.session.get(
+            'https://chatgpt.com/backend-anon/models',
+            timeout=REQUEST_TIMEOUT
+        )
+        if r.status_code >= 400:
+            return []
+        data = r.json()
+        return data.get('models', [])
+
     def _build_payload(self, message: str, tz_name: str) -> dict:
         return {
             'action': 'next',

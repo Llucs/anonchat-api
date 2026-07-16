@@ -62,57 +62,29 @@ def main():
 
     if args.list_models:
         client = ChatGPT(proxy=args.proxy) if args.proxy else ChatGPT()
-        client._fetch_cookies()
-        client._get_tokens()
-        conduit = client.get_conduit()
-        from wrapper import Headers, Challenges, VM
-        import time as _time
-        from uuid import uuid4 as _uuid4
-        proof = Challenges.solve_pow(client.data['proofofwork']['seed'],
-            client.data['proofofwork']['difficulty'], client.data['config'])
-        if not proof:
-            print('error: failed to solve POW', file=sys.stderr)
-            sys.exit(2)
-        turnstile = VM.get_turnstile(client.data['bytecode'],
-            client.data['vm_token'], str(client.ip_info[:-1]))
-        client.session.headers = Headers.CONVERSATION.copy()
-        client.session.headers.update({
-            'oai-client-version': client.data['prod'], 'oai-device-id': client.data['device-id'],
-            'openai-sentinel-chat-requirements-token': client.data['token'],
-            'openai-sentinel-proof-token': proof, 'openai-sentinel-turnstile-token': turnstile,
-            'x-conduit-token': conduit,
-        })
-        tz_name = client.ip_info[5] if len(client.ip_info) > 5 else 'UTC'
-        payload = {
-            'action': 'next',
-            'messages': [{'id': str(_uuid4()), 'author': {'role': 'user'},
-                'create_time': _time.time(), 'content': {'content_type': 'text', 'parts': ['hi']},
-                'metadata': {}}],
-            'parent_message_id': 'client-created-root', 'model': 'auto',
-            'timezone_offset_min': client.timezone_offset, 'timezone': tz_name,
-            'history_and_training_disabled': True, 'conversation_mode': {'kind': 'primary_assistant'},
-            'supports_buffering': True, 'supported_encodings': ['v1'],
-        }
-        r = client.session.post('https://chatgpt.com/backend-anon/f/conversation', json=payload)
-        models_seen = set()
-        if 'Unusual activity' not in r.text:
-            for line in r.text.split('\n'):
-                if line.startswith('data:') and '[DONE]' not in line:
-                    try:
-                        d = _json.loads(line[5:])
-                        if d.get('type') == 'conversation_detail_metadata':
-                            for m in (d.get('model_limits') or []):
-                                models_seen.add(m)
-                        elif d.get('type') == 'server_ste_metadata':
-                            slug = d.get('metadata', {}).get('model_slug')
-                            if slug:
-                                models_seen.add(slug)
-                    except Exception:
-                        pass
-        print(_json.dumps({'object': 'list', 'data': [
-            {'id': m, 'object': 'model', 'created': 1700000000, 'owned_by': 'openai'}
-            for m in sorted(models_seen)
-        ]}, indent=2))
+        models = client.list_models()
+        def _build(m):
+            pf = m.get('product_features', {})
+            att = pf.get('attachments', {})
+            return {
+                'id': m['slug'],
+                'name': m.get('title', ''),
+                'object': 'model',
+                'owned_by': 'openai',
+                'info': {
+                    'name': m.get('title', ''),
+                    'description': m.get('description', ''),
+                    'max_context_length': m.get('max_tokens', 0),
+                    'abilities': {
+                        'vision': 1 if att.get('image_mime_types') else 0,
+                        'document': 1 if att.get('accepted_mime_types') else 0,
+                        'thinking': 1 if m.get('reasoning_type') not in (None, 'none') else 0,
+                    },
+                    'tools': m.get('enabled_tools', []),
+                    'tags': m.get('tags', []),
+                },
+            }
+        print(_json.dumps({'object': 'list', 'data': [_build(m) for m in models]}, indent=2))
         return
 
     if args.stream:

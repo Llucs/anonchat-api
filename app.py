@@ -10,7 +10,6 @@ from engine.response import build_chat_response, build_stream_chunk
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger('anonchat')
 
-_known_models = set()
 _global_rate_limits = None
 
 try:
@@ -156,8 +155,6 @@ if _has_server:
                             yield f'data: {_json.dumps(chunk_data)}\n\n'
                         elif event['type'] == 'done':
                             model = event.get('model') or req.model
-                            if model and model != 'auto':
-                                _known_models.add(model)
                         elif event['type'] == 'error':
                             chunk_data = build_stream_chunk(msg_id, now, req.model, {}, 'error')
                             yield f'data: {_json.dumps(chunk_data)}\n\n'
@@ -192,13 +189,6 @@ if _has_server:
         if result.get('error'):
             return JSONResponse(content={'error': {'message': result.get('message', 'Unknown error'), 'type': 'upstream_error', 'code': 'upstream_error', 'param': None}}, status_code=413)
 
-        model = result['model'] or req.model
-        if model:
-            _known_models.add(model)
-        if result.get('model_limits'):
-            for m in result['model_limits']:
-                _known_models.add(m)
-
         global _global_rate_limits
         if result.get('rate_limits'):
             _global_rate_limits = result['rate_limits']
@@ -220,26 +210,40 @@ if _has_server:
         return {
             'status': status,
             'version': '1.0.0',
-            'models_known': len(_known_models),
         }
 
     @app.get('/v1/models')
-    async def list_models(refresh: bool = False):
-        if refresh:
-            try:
-                client = ChatGPT()
-                result = client.converse('hi', model='auto')
-                slug = result.get('model')
-                if slug and slug != 'auto':
-                    _known_models.add(slug)
-            except Exception as e:
-                logger.warning(f'model discovery failed: {e}')
+    async def list_models():
+        try:
+            client = ChatGPT()
+            models = client.list_models()
+        except Exception as e:
+            logger.warning(f'model discovery failed: {e}')
+            models = []
 
-        all_models = [{'id': 'auto', 'object': 'model', 'created': 1700000000, 'owned_by': 'openai'}]
-        for m in sorted(_known_models):
-            if m != 'auto':
-                all_models.append({'id': m, 'object': 'model', 'created': 1700000000, 'owned_by': 'openai'})
-        return {'object': 'list', 'data': all_models}
+        def _build(m):
+            pf = m.get('product_features', {})
+            att = pf.get('attachments', {})
+            return {
+                'id': m['slug'],
+                'name': m.get('title', ''),
+                'object': 'model',
+                'owned_by': 'openai',
+                'info': {
+                    'name': m.get('title', ''),
+                    'description': m.get('description', ''),
+                    'max_context_length': m.get('max_tokens', 0),
+                    'abilities': {
+                        'vision': 1 if att.get('image_mime_types') else 0,
+                        'document': 1 if att.get('accepted_mime_types') else 0,
+                        'thinking': 1 if m.get('reasoning_type') not in (None, 'none') else 0,
+                    },
+                    'tools': m.get('enabled_tools', []),
+                    'tags': m.get('tags', []),
+                },
+            }
+
+        return {'object': 'list', 'data': [_build(m) for m in models]}
 
     @app.get('/v1/usage')
     async def usage():
