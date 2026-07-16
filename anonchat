@@ -42,6 +42,33 @@ def main():
         wrapper.logger.Log.Error = lambda *a, **kw: None
         wrapper.logger.Log.Info = lambda *a, **kw: None
 
+    if args.list_models:
+        client = ChatGPT(proxy=args.proxy) if args.proxy else ChatGPT()
+        models = client.list_models()
+        def _build(m):
+            pf = m.get('product_features', {})
+            att = pf.get('attachments', {})
+            return {
+                'id': m['slug'],
+                'name': m.get('title', ''),
+                'object': 'model',
+                'owned_by': 'openai',
+                'info': {
+                    'name': m.get('title', ''),
+                    'description': m.get('description', ''),
+                    'max_context_length': m.get('max_tokens', 0),
+                    'abilities': {
+                        'vision': 1 if att.get('image_mime_types') else 0,
+                        'document': 1 if att.get('accepted_mime_types') else 0,
+                        'thinking': 1 if m.get('reasoning_type') not in (None, 'none') else 0,
+                    },
+                    'tools': m.get('enabled_tools', []),
+                    'tags': m.get('tags', []),
+                },
+            }
+        print(_json.dumps({'object': 'list', 'data': [_build(m) for m in models]}, indent=2))
+        return
+
     if args.message:
         text = ' '.join(args.message)
     elif not sys.stdin.isatty():
