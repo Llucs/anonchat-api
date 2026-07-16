@@ -5,6 +5,7 @@ import re
 from wrapper import ChatGPT as _BaseChatGPT
 
 _RICH_BLOCK_RE = re.compile(r':::(\w+)\{.*?\}(.*?):::', re.DOTALL)
+_RICH_BLOCK_START = re.compile(r':::\w+\{[^}]*\}')
 
 def _clean_rich_blocks(text):
     if not text:
@@ -21,10 +22,16 @@ def _clean_markers(text):
             sep = text.index('\ue202', start)
         except ValueError:
             sep = None
-        try:
-            end = text.index('\ue201', (sep if sep else start) + 1)
-        except ValueError:
+        # Search for closing \ue201 but stop at next \ue200
+        search_from = (sep if sep is not None else start) + 1
+        next_ue200 = text.find('\ue200', search_from)
+        end_pos = text.find('\ue201', search_from)
+        if end_pos != -1 and next_ue200 != -1 and end_pos > next_ue200:
             end = None
+        elif end_pos == -1:
+            end = None
+        else:
+            end = end_pos
         if sep is None and end is None:
             text = text[:start] + text[start + 1:]
             continue
@@ -34,7 +41,16 @@ def _clean_markers(text):
         if end is None:
             after = text[sep + 1:]
             if after.startswith('['):
-                text = text[:start]
+                # Truncated entity marker — this is partial JSON data.
+                # Find where the JSON array data transitions back to normal text
+                # by looking for the last "," separator that's near the start.
+                # Everything after that last "," is the content text.
+                last_sep = after.rfind('","', 0, min(len(after), 200))
+                if last_sep != -1:
+                    content_start = last_sep + 3
+                    text = text[:start] + after[content_start:]
+                else:
+                    text = text[:start] + after
             else:
                 text = text[:start] + after
             continue
@@ -274,9 +290,30 @@ class ChatGPT(_BaseChatGPT):
 
         yield {'type': 'meta', 'model': self._requested_model}
 
+        pending_rich_prefix = False
+
         try:
             for chunk in self.start_conversation_stream(message):
                 cleaned = _clean_markers(chunk)
+                if not cleaned:
+                    continue
+                if pending_rich_prefix:
+                    close_idx = cleaned.find('}')
+                    if close_idx != -1:
+                        cleaned = cleaned[close_idx + 1:]
+                        pending_rich_prefix = False
+                    else:
+                        continue
+                if ':::' in cleaned:
+                    cleaned = re.sub(r':::\w+(?:\{[^}]*\})?', '', cleaned)
+                    cleaned = cleaned.replace(':::', '')
+                if cleaned.startswith('{') and re.match(r'\{[^}]*=\s*["\']', cleaned):
+                    close_idx = cleaned.find('}')
+                    if close_idx != -1:
+                        cleaned = cleaned[close_idx + 1:]
+                    else:
+                        pending_rich_prefix = True
+                        continue
                 if cleaned:
                     yield {'type': 'chunk', 'text': cleaned}
         except SystemExit:
