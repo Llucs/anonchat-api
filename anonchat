@@ -56,7 +56,7 @@ def main():
                 'info': {
                     'name': m.get('title', ''),
                     'description': m.get('description', ''),
-                    'max_context_length': m.get('max_tokens', 0),
+                    'max_tokens': m.get('max_tokens', 0),
                     'abilities': {
                         'vision': 1 if att.get('image_mime_types') else 0,
                         'document': 1 if att.get('accepted_mime_types') else 0,
@@ -86,33 +86,6 @@ def main():
                 import base64
                 b64 = base64.b64encode(f.read()).decode()
                 image_data = f'data:image/png;base64,{b64}'
-
-    if args.list_models:
-        client = ChatGPT(proxy=args.proxy) if args.proxy else ChatGPT()
-        models = client.list_models()
-        def _build(m):
-            pf = m.get('product_features', {})
-            att = pf.get('attachments', {})
-            return {
-                'id': m['slug'],
-                'name': m.get('title', ''),
-                'object': 'model',
-                'owned_by': 'openai',
-                'info': {
-                    'name': m.get('title', ''),
-                    'description': m.get('description', ''),
-                    'max_context_length': m.get('max_tokens', 0),
-                    'abilities': {
-                        'vision': 1 if att.get('image_mime_types') else 0,
-                        'document': 1 if att.get('accepted_mime_types') else 0,
-                        'thinking': 1 if m.get('reasoning_type') not in (None, 'none') else 0,
-                    },
-                    'tools': m.get('enabled_tools', []),
-                    'tags': m.get('tags', []),
-                },
-            }
-        print(_json.dumps({'object': 'list', 'data': [_build(m) for m in models]}, indent=2))
-        return
 
     if args.stream:
         try:

@@ -232,7 +232,7 @@ if _has_server:
                 'info': {
                     'name': m.get('title', ''),
                     'description': m.get('description', ''),
-                    'max_context_length': m.get('max_tokens', 0),
+                    'max_tokens': m.get('max_tokens', 0),
                     'abilities': {
                         'vision': 1 if att.get('image_mime_types') else 0,
                         'document': 1 if att.get('accepted_mime_types') else 0,
