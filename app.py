@@ -2,10 +2,9 @@ import json as _json
 import logging
 from time import time
 from uuid import uuid4
-from typing import Optional
 
 from engine.session import ChatGPT
-from engine.response import build_chat_response, build_stream_chunk
+from engine.response import build_model_list, build_chat_response, build_stream_chunk, _count
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger('anonchat')
@@ -13,18 +12,10 @@ logger = logging.getLogger('anonchat')
 _global_rate_limits = None
 
 try:
-    import tiktoken
-    _enc = tiktoken.get_encoding('o200k_base')
-    def _count(s):
-        return len(_enc.encode(s)) if s else 0
-except ImportError:
-    def _count(s):
-        return max(1, len(s) // 4)
-
-try:
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Request
     from fastapi.responses import StreamingResponse, JSONResponse
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.exceptions import RequestValidationError
     from pydantic import BaseModel
     from uvicorn import run
     _has_server = True
@@ -35,7 +26,7 @@ if _has_server:
 
     class Message(BaseModel):
         role: str
-        content: str | None = None
+        content: str | list | None = None
         tool_calls: list | None = None
         tool_call_id: str | None = None
 
@@ -46,7 +37,12 @@ if _has_server:
     class ResponseFormat(BaseModel):
         type: str = 'text'
 
+    class StreamOptions(BaseModel):
+        include_usage: bool = False
+
     class ChatRequest(BaseModel):
+        model_config = {'extra': 'forbid'}
+
         messages: list[Message]
         model: str = 'auto'
         stream: bool = False
@@ -68,103 +64,241 @@ if _has_server:
         tool_choice: str | None = None
         response_format: ResponseFormat | None = None
         extended: bool = False
+        stream_options: StreamOptions | None = None
 
     app = FastAPI(title='anonchat-api', version='1.0.0')
 
     app.add_middleware(
         CORSMiddleware,
         allow_origins=['*'],
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=['*'],
         allow_headers=['*'],
     )
 
+    def _error(message: str, status_code: int = 400, code: str = 'invalid_request_error', param=None):
+        return JSONResponse(
+            content={'error': {'message': message, 'type': code, 'code': code, 'param': param}},
+            status_code=status_code,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_handler(request: Request, exc: RequestValidationError):
+        errors = getattr(exc, 'errors', lambda: [])()
+        if not errors:
+            message = 'Invalid request'
+            param = None
+        else:
+            first = errors[0]
+            loc = first.get('loc', [])
+            msg = str(first.get('msg', ''))
+            if msg == 'JSON decode error':
+                message = 'Invalid JSON payload: could not parse the request body.'
+                param = None
+            elif msg.startswith('Field required') and 'messages' in loc:
+                message = 'messages is required'
+                param = 'messages'
+            else:
+                if 'content' in loc:
+                    param = 'content'
+                    message = 'Invalid value for content'
+                else:
+                    param = next((str(x) for x in reversed(loc) if isinstance(x, str)), None)
+                    if msg.startswith('Extra inputs are not permitted'):
+                        message = f"Unknown parameter: '{param}'."
+                    elif param == 'model':
+                        message = 'Invalid value for model'
+                    else:
+                        message = f'Invalid value for {param}: {msg}'
+        return _error(message, 400, 'invalid_request_error', param)
+
+    def _flatten_content(content, images: list) -> str:
+        """Flatten OpenAI-style content (str or list of parts) to plain text."""
+        if content is None:
+            return ''
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for p in content:
+                if isinstance(p, str):
+                    parts.append(p)
+                elif isinstance(p, dict):
+                    t = p.get('type')
+                    if t == 'text':
+                        parts.append(str(p.get('text', '')))
+                    elif t in ('image_url', 'input_image'):
+                        img = p.get('image_url') or {}
+                        url = img if isinstance(img, str) else img.get('url', '')
+                        if url:
+                            images.append(url)
+            return '\n'.join(x for x in parts if x)
+        return str(content)
+
+    def _build_prompt(messages: list, images: list) -> tuple[str, str, str, str | None]:
+        """Flatten the conversation into a single guest-mode prompt.
+
+        Returns (prompt_text, image_param, last_user_message, system_prompt).
+        """
+        system_prompt = None
+        turns = []
+        last_user = None
+        for m in messages:
+            content = _flatten_content(m.content, images)
+            if m.role == 'system':
+                system_prompt = content or None
+            elif m.role == 'user':
+                if content:
+                    last_user = content
+                    turns.append(f'user: {content}')
+                else:
+                    turns.append('user: (empty)')
+            elif m.role == 'assistant':
+                if m.content:
+                    turns.append(f'assistant: {content}')
+                elif m.tool_calls:
+                    calls = _json.dumps(m.tool_calls)[:500]
+                    turns.append(f'assistant: [tool calls: {calls}]')
+                else:
+                    turns.append('assistant: (empty)')
+            elif m.role == 'tool':
+                turns.append(f'tool ({m.tool_call_id}): {content}')
+        prompt_text = '\n'.join(turns)
+        image_param = None
+        if images:
+            image_param = images[0]
+        return prompt_text, image_param, last_user, system_prompt
+
+    def _stream_error(message: str, code: str = 'upstream_error') -> str:
+        return f'data: {_json.dumps({"error": {"message": message, "type": code, "code": code, "param": None}})}\n\n'
+
     @app.post('/v1/chat/completions')
     async def chat_completions(req: ChatRequest):
         if not req.messages:
-            return JSONResponse(content={'error': {'message': 'messages is required', 'type': 'invalid_request_error', 'code': 'invalid_request_error', 'param': None}}, status_code=400)
+            return _error('messages is required', 400)
 
-        last_msg = next((m for m in reversed(req.messages) if m.role == 'user'), None)
-        if not last_msg:
-            return JSONResponse(content={'error': {'message': 'No user message found', 'type': 'invalid_request_error', 'code': 'invalid_request_error', 'param': None}}, status_code=400)
+        if req.n is not None and req.n != 1:
+            return _error('n is not supported by this API (only n=1)', 400, 'unsupported_parameter', 'n')
 
-        system_msg = next((m for m in req.messages if m.role == 'system'), None)
-        system_prompt = system_msg.content if system_msg else None
+        if req.response_format is not None and req.response_format.type not in ('text', 'none'):
+            return _error(
+                'response_format is not supported by this API',
+                400,
+                'unsupported_parameter',
+                'response_format',
+            )
 
-        prompt_parts = []
-        for m in req.messages:
-            role = m.role
-            content = m.content or ''
-            if role == 'system':
-                prompt_parts.append(f'system: {content}')
-            elif role == 'user':
-                prompt_parts.append(f'user: {content}')
-            elif role == 'assistant':
-                prompt_parts.append(f'assistant: {content}')
-            elif role == 'tool':
-                prompt_parts.append(f'tool ({m.tool_call_id}): {content}')
-        prompt_text = '\n'.join(prompt_parts)
+        images: list = []
+        prompt_text, image_param, last_user, system_prompt = _build_prompt(req.messages, images)
+        if not images and req.image:
+            images.append(req.image)
+            image_param = req.image
 
-        tool_results = []
+        if last_user is None:
+            return _error('No user message found', 400)
+
+        # Resuming an existing conversation? The guest backend keeps that
+        # history server-side, so only the new user turn is sent. Otherwise
+        # the flattened transcript is sent to preserve multi-turn memory.
+        resume = bool(req.conversation_id and req.parent_message_id)
+        if resume:
+            message_text = last_user
+        elif system_prompt:
+            message_text = f"[System: {system_prompt}]\n\n{prompt_text}"
+        else:
+            message_text = prompt_text
+
+        # Use the transcript actually transmitted for token accounting.
+        prompt_for_tokens = message_text
+
         conv_id = req.conversation_id
         parent_id = req.parent_message_id
-        for m in req.messages:
-            if m.role == 'tool' and m.tool_call_id:
-                tool_results.append({'tool_call_id': m.tool_call_id, 'content': m.content or ''})
-            if m.role == 'assistant' and m.tool_calls:
-                if not conv_id:
-                    conv_id = getattr(m, 'conversation_id', None)
-
-        try:
-            client = ChatGPT(proxy=req.proxy) if req.proxy else ChatGPT()
-            image = req.image
-            requested_model = None if req.model == 'auto' else req.model
-
-            tools_list = [t.model_dump() for t in req.tools] if req.tools else None
-
-            if system_prompt and not req.conversation_id:
-                message_text = f"[System: {system_prompt}]\n\n{last_msg.content or ''}"
-            else:
-                message_text = last_msg.content or ''
-
-            image_param = None
-            if image:
-                if image.startswith('data:image') or not image.startswith('http'):
-                    image_param = image
-                else:
-                    image_param = image
-        except SystemExit:
-            return JSONResponse(content={'error': {'message': 'IP flagged by ChatGPT. Use a different IP or proxy.', 'type': 'ip_flagged', 'code': 'ip_flagged', 'param': None}}, status_code=502)
+        tools_list = [t.model_dump() for t in req.tools] if req.tools else None
 
         if req.stream:
             now = int(time())
             msg_id = f'chatcmpl-{uuid4().hex[:16]}'
+            model = req.model
 
             def stream():
-                yield f'data: {_json.dumps(build_stream_chunk(msg_id, now, req.model, {"role": "assistant", "content": ""}))}\n\n'
+                client = None
+                try:
+                    client = ChatGPT(proxy=req.proxy) if req.proxy else ChatGPT()
+                except SystemExit:
+                    yield _stream_error('IP flagged by ChatGPT. Use a different IP or proxy.', 'ip_flagged')
+                    return
+                except Exception:
+                    logger.exception('failed to create client')
+                    yield _stream_error('Failed to initialize guest session')
+                    return
+
+                role_delta = build_stream_chunk(msg_id, now, model, {"role": "assistant", "content": ""})
+                yield f'data: {_json.dumps(role_delta)}\n\n'
+                streamed_text = []
+                final_model = model
                 try:
                     for event in client.converse_stream(
-                        message=message_text,
-                        image=image_param,
-                        conversation_id=conv_id,
-                        parent_message_id=parent_id,
-                        model=requested_model,
+                            message=message_text,
+                            image=image_param,
+                            conversation_id=conv_id,
+                            parent_message_id=parent_id,
+                            model=None if req.model == 'auto' else req.model,
+                            tools=tools_list,
+                            tool_choice=req.tool_choice,
+                            temperature=req.temperature,
+                            top_p=req.top_p,
+                            stop=req.stop,
+                            max_tokens=req.max_tokens,
+                            max_completion_tokens=req.max_completion_tokens,
+                            seed=req.seed,
+                            frequency_penalty=req.frequency_penalty,
+                            presence_penalty=req.presence_penalty,
                     ):
                         if event['type'] == 'chunk':
-                            chunk_data = build_stream_chunk(msg_id, now, req.model, {'content': event['text']})
+                            streamed_text.append(event['text'])
+                            chunk_data = build_stream_chunk(msg_id, now, model, {'content': event['text']})
                             yield f'data: {_json.dumps(chunk_data)}\n\n'
                         elif event['type'] == 'done':
-                            model = event.get('model') or req.model
+                            final_model = event.get('model') or model
                         elif event['type'] == 'error':
-                            chunk_data = build_stream_chunk(msg_id, now, req.model, {}, 'error')
-                            yield f'data: {_json.dumps(chunk_data)}\n\n'
-                except Exception as e:
+                            logger.error(f'upstream streaming error: {event.get("error")}')
+                except SystemExit:
+                    logger.error('IP flagged during stream')
+                    yield _stream_error('IP flagged by ChatGPT. Use a different IP or proxy.', 'ip_flagged')
+                    return
+                except Exception:
                     logger.exception('stream failed')
-                chunk_data = build_stream_chunk(msg_id, now, req.model, {}, 'stop')
-                yield f'data: {_json.dumps(chunk_data)}\n\n'
+                    yield _stream_error('An internal error occurred', 'server_error')
+                    return
+
+                usage = None
+                if req.stream_options is not None and req.stream_options.include_usage:
+                    usage = {
+                        'prompt_tokens': _count(prompt_for_tokens),
+                        'completion_tokens': _count(''.join(streamed_text)),
+                        'total_tokens': _count(prompt_for_tokens) + _count(''.join(streamed_text)),
+                    }
+
+                stop_chunk = build_stream_chunk(msg_id, now, final_model, {}, 'stop', usage=usage)
+                yield f'data: {_json.dumps(stop_chunk)}\n\n'
                 yield 'data: [DONE]\n\n'
 
             return StreamingResponse(stream(), media_type='text/event-stream')
+
+        try:
+            client = ChatGPT(proxy=req.proxy) if req.proxy else ChatGPT()
+        except SystemExit:
+            return _error('IP flagged by ChatGPT. Use a different IP or proxy.', 502, 'ip_flagged')
+        except RuntimeError as e:
+            return _error(str(e), 502, 'upstream_error')
+        except Exception:
+            logger.exception('client init failed')
+            return _error('Failed to initialize guest session', 502, 'upstream_error')
+
+        tool_results = []
+        for m in req.messages:
+            if m.role == 'tool' and m.tool_call_id:
+                tool_results.append({'tool_call_id': m.tool_call_id, 'content': m.content or ''})
 
         try:
             result = client.converse(
@@ -172,43 +306,40 @@ if _has_server:
                 image=image_param,
                 conversation_id=conv_id,
                 parent_message_id=parent_id,
-                model=requested_model,
+                model=None if req.model == 'auto' else req.model,
                 tools=tools_list,
                 tool_results=tool_results if tool_results else None,
                 tool_choice=req.tool_choice,
+                temperature=req.temperature,
+                top_p=req.top_p,
+                stop=req.stop,
+                max_tokens=req.max_tokens,
+                max_completion_tokens=req.max_completion_tokens,
+                seed=req.seed,
+                frequency_penalty=req.frequency_penalty,
+                presence_penalty=req.presence_penalty,
             )
         except SystemExit:
-            return JSONResponse(content={'error': {'message': 'IP flagged by ChatGPT. Use a different IP or proxy.', 'type': 'ip_flagged', 'code': 'ip_flagged', 'param': None}}, status_code=502)
+            return _error('IP flagged by ChatGPT. Use a different IP or proxy.', 502, 'ip_flagged')
         except RuntimeError as e:
             logger.warning(f'Runtime error: {e}')
-            return JSONResponse(content={'error': {'message': str(e), 'type': 'upstream_error', 'code': 'upstream_error', 'param': None}}, status_code=502)
-        except Exception as e:
+            return _error(str(e), 502, 'upstream_error')
+        except Exception:
             logger.exception('chat failed')
-            return JSONResponse(content={'error': {'message': 'An internal error occurred', 'type': 'server_error', 'code': 'server_error', 'param': None}}, status_code=500)
-
-        if result.get('error'):
-            return JSONResponse(content={'error': {'message': result.get('message', 'Unknown error'), 'type': 'upstream_error', 'code': 'upstream_error', 'param': None}}, status_code=413)
+            return _error('An internal error occurred', 500, 'server_error')
 
         global _global_rate_limits
         if result.get('rate_limits'):
             _global_rate_limits = result['rate_limits']
 
-        body = build_chat_response(result, prompt_text, model, extended=req.extended)
-
+        model_out = result.get('model') or req.model
+        body = build_chat_response(result, prompt_for_tokens, model_out, extended=req.extended)
         return body
 
     @app.get('/health')
     async def health():
-        status = 'ok'
-        try:
-            import curl_cffi
-            client = ChatGPT()
-            status = 'ok'
-        except Exception as e:
-            logger.warning(f'Health check: {e}')
-            status = 'degraded'
         return {
-            'status': status,
+            'status': 'ok',
             'version': '1.0.0',
         }
 
@@ -221,29 +352,7 @@ if _has_server:
             logger.warning(f'model discovery failed: {e}')
             models = []
 
-        def _build(m):
-            pf = m.get('product_features', {})
-            att = pf.get('attachments', {})
-            return {
-                'id': m['slug'],
-                'name': m.get('title', ''),
-                'object': 'model',
-                'owned_by': 'openai',
-                'info': {
-                    'name': m.get('title', ''),
-                    'description': m.get('description', ''),
-                    'max_tokens': m.get('max_tokens', 0),
-                    'abilities': {
-                        'vision': 1 if att.get('image_mime_types') else 0,
-                        'document': 1 if att.get('accepted_mime_types') else 0,
-                        'thinking': 1 if m.get('reasoning_type') not in (None, 'none') else 0,
-                    },
-                    'tools': m.get('enabled_tools', []),
-                    'tags': m.get('tags', []),
-                },
-            }
-
-        return {'object': 'list', 'data': [_build(m) for m in models]}
+        return build_model_list(models)
 
     @app.get('/v1/usage')
     async def usage():
@@ -258,7 +367,11 @@ if __name__ == '__main__':
         _port = 8000
         for _i, _a in enumerate(_sys.argv):
             if _a == '--port' and _i + 1 < len(_sys.argv):
-                _port = int(_sys.argv[_i + 1])
+                try:
+                    _port = int(_sys.argv[_i + 1])
+                except ValueError:
+                    print(f'error: invalid port "{_sys.argv[_i + 1]}"', file=_sys.stderr)
+                    _sys.exit(1)
         run(app, host='0.0.0.0', port=_port, log_level='info')
     else:
         print('Server deps not installed. Install: pip install fastapi uvicorn pydantic')
