@@ -1,11 +1,14 @@
 from json import loads as _loads
-from typing import Generator, Optional
+from random import randint
+from time import time
+from collections.abc import Generator
+from uuid import uuid4
 import re
 
-from wrapper import ChatGPT as _BaseChatGPT
+from wrapper import ChatGPT as _BaseChatGPT, Headers, Challenges, VM, Log
+from engine.text import TextAssembler
 
 _RICH_BLOCK_RE = re.compile(r':::(\w+)\{.*?\}(.*?):::', re.DOTALL)
-_RICH_BLOCK_START = re.compile(r':::\w+\{[^}]*\}')
 
 def _clean_rich_blocks(text):
     if not text:
@@ -104,7 +107,7 @@ class ChatGPT(_BaseChatGPT):
 
     def _parse_event_stream(self, stream_data: str) -> str:
         self._reset_meta()
-        parts = []
+        assem = TextAssembler()
         seen_assistant = False
 
         for line in stream_data.strip().split('\n'):
@@ -164,8 +167,10 @@ class ChatGPT(_BaseChatGPT):
                     if role == 'assistant':
                         seen_assistant = True
                         initial = msg.get('content', {}).get('parts', [])
-                        if initial and initial[0]:
-                            parts.append(initial[0])
+                        if initial:
+                            first = initial[0]
+                            if isinstance(first, str):
+                                assem.absorb(first, full_snapshot=True)
                         meta = msg.get('metadata', {})
                         if meta.get('citations'):
                             self.citations = meta['citations']
@@ -186,18 +191,22 @@ class ChatGPT(_BaseChatGPT):
                             self.parent_message_id = mid
 
             if data.get('o') == 'append' and data.get('p') == '/message/content/parts/0':
-                parts.append(data.get('v'))
+                part = data.get('v')
+                if isinstance(part, str):
+                    assem.absorb(part)
             elif data.get('o') == 'patch' and isinstance(data.get('v'), list) and seen_assistant:
                 for op in data.get('v'):
                     if op.get('o') == 'append' and op.get('p') == '/message/content/parts/0':
-                        parts.append(op.get('v'))
+                        part = op.get('v')
+                        if isinstance(part, str):
+                            assem.absorb(part)
             elif 'v' in data and isinstance(data['v'], str) and seen_assistant:
                 v = data['v']
-                if len(v) < 30 and v.replace('_', '').isalnum():
+                if re.fullmatch(r'[\w-]{30,}', v):
                     continue
-                parts.append(v)
+                assem.absorb(v)
 
-        return _clean_markers(''.join(parts))
+        return _clean_markers(assem.text())
 
     def _extract_reasoning(self, text: str):
         reasoning_text = ''
@@ -214,17 +223,35 @@ class ChatGPT(_BaseChatGPT):
     def converse(self, message: str, image: str = None,
                  conversation_id: str = None, parent_message_id: str = None,
                  model: str = None, tools: list = None,
-                 tool_results: list = None, tool_choice: str = None) -> dict:
+                 tool_results: list = None, tool_choice: str = None,
+                 temperature: float = None, top_p: float = None,
+                 stop: str | list[str] = None, max_tokens: int = None,
+                 max_completion_tokens: int = None, seed: int = None,
+                 frequency_penalty: float = None,
+                 presence_penalty: float = None) -> dict:
         self._reset_meta()
         self.resume_token = None
         self.rate_limits = None
         self._requested_model = model or 'auto'
         self._tool_calls = None
+        self.chat_params = {
+            'temperature': temperature,
+            'top_p': top_p,
+            'stop': stop,
+            'max_tokens': max_completion_tokens or max_tokens,
+            'seed': seed,
+            'frequency_penalty': frequency_penalty,
+            'presence_penalty': presence_penalty,
+        }
+        self._apply_chat_params()
 
         original_post = self.session.post
         def _patched_post(url, **kwargs):
             if 'json' in kwargs and 'model' in kwargs['json']:
                 kwargs['json']['model'] = self._requested_model
+                for _k, _v in self.chat_params.items():
+                    if _v is not None and _k not in kwargs['json']:
+                        kwargs['json'][_k] = _v
             if tools and 'json' in kwargs:
                 kwargs['json']['tools'] = tools
             if tool_choice and 'json' in kwargs:
@@ -248,6 +275,8 @@ class ChatGPT(_BaseChatGPT):
 
         conv_id = self.data.get('conversation_id') or self.conversation_id
         parent_id = self.data.get('parent_message_id') or self.parent_message_id
+        self.data['conversation_id'] = conv_id
+        self.data['parent_message_id'] = parent_id
 
         text = self.response
 
@@ -285,19 +314,38 @@ class ChatGPT(_BaseChatGPT):
 
     def converse_stream(self, message: str, image: str = None,
                         conversation_id: str = None, parent_message_id: str = None,
-                        model: str = None) -> Generator[dict, None, None]:
+                        model: str = None, tools: list = None,
+                        tool_choice: str = None, temperature: float = None,
+                        top_p: float = None, stop: str | list[str] = None,
+                        max_tokens: int = None, max_completion_tokens: int = None,
+                        seed: int = None, frequency_penalty: float = None,
+                        presence_penalty: float = None) -> Generator[dict, None, None]:
         self._reset_meta()
         self.resume_token = None
         self.rate_limits = None
         self._requested_model = model or 'auto'
         self._tool_calls = None
+        self.chat_params = {
+            'temperature': temperature,
+            'top_p': top_p,
+            'stop': stop,
+            'max_tokens': max_completion_tokens or max_tokens,
+            'seed': seed,
+            'frequency_penalty': frequency_penalty,
+            'presence_penalty': presence_penalty,
+        }
+        self._apply_chat_params()
 
         yield {'type': 'meta', 'model': self._requested_model}
 
         pending_rich_prefix = False
 
         try:
-            for chunk in self.start_conversation_stream(message):
+            for chunk in self.start_conversation_stream(
+                message,
+                tools=tools,
+                tool_choice=tool_choice,
+            ):
                 cleaned = _clean_markers(chunk)
                 if not cleaned:
                     continue
@@ -335,23 +383,29 @@ class ChatGPT(_BaseChatGPT):
             'parent_message_id': self.data.get('parent_message_id') or self.parent_message_id,
         }
 
-    def _send_tool_results(self, tool_results: list, conversation_id: str, parent_message_id: str):
-        from random import randint
-        from wrapper import Headers, Challenges, VM, Log
-        from uuid import uuid4
-        from time import time
+    def _apply_chat_params(self):
+        for k, v in list(self.chat_params.items()):
+            if v is None:
+                self.chat_params.pop(k)
+            elif k == 'stop' and isinstance(v, str):
+                self.chat_params['stop'] = [v]
+        self.chat_params.setdefault('max_tokens', None)
 
+    def _run_conversation(self, messages: list) -> None:
+        """Run one guest-backend turn (follow-up or tool results).
+
+        Both turn types share the same machinery: tokens, proof-of-work,
+        turnstile, headers, and the identical envelope payload. Only the
+        ``messages`` list differs.
+        """
         if not self.data.get('prod'):
             self._fetch_cookies()
 
-        self.data['conversation_id'] = conversation_id
-        self.data['parent_message_id'] = parent_message_id
-        self.conversation_id = conversation_id
-        self.parent_message_id = parent_message_id
-
         conduit_token = self.get_conduit(next=True)
+
         self._get_tokens(randint(self._turn_index, self._turn_index + 1000))
         self._turn_index += 3000
+
         time_1 = randint(self._turn_index, self._turn_index + 3000)
         proof_token = Challenges.solve_pow(
             self.data['proofofwork']['seed'],
@@ -359,7 +413,7 @@ class ChatGPT(_BaseChatGPT):
             self.data['config']
         )
         if not proof_token:
-            raise RuntimeError("Failed to solve POW for tool results")
+            raise RuntimeError("Failed to solve POW for conversation turn")
         turnstile_token = VM.get_turnstile(
             self.data['bytecode'],
             self.data['vm_token'],
@@ -368,7 +422,7 @@ class ChatGPT(_BaseChatGPT):
 
         tz_name = self.ip_info[5] if len(self.ip_info) > 5 else 'UTC'
 
-        self.session.headers = Headers.CONVERSATION
+        self.session.headers = dict(Headers.CONVERSATION)
         self.session.headers.update({
             'oai-client-version': self.data['prod'],
             'oai-device-id': self.data['device-id'],
@@ -378,6 +432,40 @@ class ChatGPT(_BaseChatGPT):
             'openai-sentinel-turnstile-token': turnstile_token,
             'x-conduit-token': conduit_token,
         })
+
+        payload = {
+            'action': 'next',
+            'messages': messages,
+            'conversation_id': self.data.get('conversation_id', ''),
+            'parent_message_id': self.data.get('parent_message_id', ''),
+            'model': 'auto',
+            'timezone_offset_min': self.timezone_offset,
+            'timezone': tz_name,
+            'history_and_training_disabled': True,
+            'conversation_mode': {'kind': 'primary_assistant'},
+            'enable_message_followups': True,
+            'system_hints': [],
+            'supports_buffering': True,
+            'supported_encodings': ['v1'],
+            'client_contextual_info': dict(self.browser_metrics),
+        }
+
+        r = self.session.post('https://chatgpt.com/backend-anon/f/conversation', json=payload, timeout=30)
+        self.session.cookies.update(r.cookies)
+        if 'Unusual activity' in r.text:
+            Log.Error('IP flagged by ChatGPT')
+            raise SystemExit(r.status_code)
+
+        self.response = self._parse_event_stream(r.text)
+
+    def _send_tool_results(self, tool_results: list, conversation_id: str, parent_message_id: str):
+        if not self.data.get('prod'):
+            self._fetch_cookies()
+
+        self.data['conversation_id'] = conversation_id
+        self.data['parent_message_id'] = parent_message_id
+        self.conversation_id = conversation_id
+        self.parent_message_id = parent_message_id
 
         messages = []
         for tr in tool_results:
@@ -389,47 +477,12 @@ class ChatGPT(_BaseChatGPT):
                 'metadata': {'tool_call_id': tr.get('tool_call_id', '')},
             })
 
-        payload = {
-            'action': 'next',
-            'messages': messages,
-            'conversation_id': conversation_id,
-            'parent_message_id': parent_message_id,
-            'model': 'auto',
-            'timezone_offset_min': self.timezone_offset,
-            'timezone': tz_name,
-            'history_and_training_disabled': True,
-            'conversation_mode': {'kind': 'primary_assistant'},
-            'enable_message_followups': True,
-            'system_hints': [],
-            'supports_buffering': True,
-            'supported_encodings': ['v1'],
-            'client_contextual_info': {
-                'is_dark_mode': True,
-                'time_since_loaded': randint(3, 6),
-                'page_height': 1219,
-                'page_width': 3440,
-                'pixel_ratio': 1,
-                'screen_height': 1440,
-                'screen_width': 3440,
-            },
-        }
-
-        r = self.session.post('https://chatgpt.com/backend-anon/f/conversation', json=payload, timeout=30)
-        self.session.cookies.update(r.cookies)
-        if 'Unusual activity' in r.text:
-            Log.Error('IP flagged by ChatGPT')
-            raise SystemExit(r.status_code)
+        self._run_conversation(messages)
 
         self.data['conversation_id'] = conversation_id
         self.conversation_id = conversation_id
-        self.response = self._parse_event_stream(r.text)
 
     def _send_followup(self, message: str, conversation_id: str, parent_message_id: str):
-        from random import randint
-        from wrapper import Headers, Challenges, VM, Log
-        from uuid import uuid4
-        from time import time
-
         if not self.data.get('prod'):
             self._fetch_cookies()
 
@@ -438,76 +491,15 @@ class ChatGPT(_BaseChatGPT):
         self.conversation_id = conversation_id
         self.parent_message_id = parent_message_id
 
-        conduit_token = self.get_conduit(next=True)
+        messages = [{
+            'id': str(uuid4()),
+            'author': {'role': 'user'},
+            'create_time': round(time(), 3),
+            'content': {'content_type': 'text', 'parts': [message]},
+            'metadata': {},
+        }]
 
-        self._get_tokens(randint(self._turn_index, self._turn_index + 1000))
-        self._turn_index += 3000
-
-        time_1 = randint(self._turn_index, self._turn_index + 3000)
-        proof_token = Challenges.solve_pow(
-            self.data['proofofwork']['seed'],
-            self.data['proofofwork']['difficulty'],
-            self.data['config']
-        )
-        if not proof_token:
-            raise RuntimeError("Failed to solve POW for follow-up")
-        turnstile_token = VM.get_turnstile(
-            self.data['bytecode'],
-            self.data['vm_token'],
-            str(self.ip_info[:-1])
-        )
-
-        tz_name = self.ip_info[5] if len(self.ip_info) > 5 else 'UTC'
-
-        self.session.headers = Headers.CONVERSATION
-        self.session.headers.update({
-            'oai-client-version': self.data['prod'],
-            'oai-device-id': self.data['device-id'],
-            'oai-echo-logs': f'0,{time_1},1,{time_1 + randint(1000, 1200)}',
-            'openai-sentinel-chat-requirements-token': self.data['token'],
-            'openai-sentinel-proof-token': proof_token,
-            'openai-sentinel-turnstile-token': turnstile_token,
-            'x-conduit-token': conduit_token,
-        })
-
-        payload = {
-            'action': 'next',
-            'messages': [{
-                'id': str(uuid4()),
-                'author': {'role': 'user'},
-                'create_time': round(time(), 3),
-                'content': {'content_type': 'text', 'parts': [message]},
-                'metadata': {},
-            }],
-            'conversation_id': conversation_id,
-            'parent_message_id': parent_message_id,
-            'model': 'auto',
-            'timezone_offset_min': self.timezone_offset,
-            'timezone': tz_name,
-            'history_and_training_disabled': True,
-            'conversation_mode': {'kind': 'primary_assistant'},
-            'enable_message_followups': True,
-            'system_hints': [],
-            'supports_buffering': True,
-            'supported_encodings': ['v1'],
-            'client_contextual_info': {
-                'is_dark_mode': True,
-                'time_since_loaded': randint(3, 6),
-                'page_height': 1219,
-                'page_width': 3440,
-                'pixel_ratio': 1,
-                'screen_height': 1440,
-                'screen_width': 3440,
-            },
-        }
-
-        r = self.session.post('https://chatgpt.com/backend-anon/f/conversation', json=payload, timeout=30)
-        self.session.cookies.update(r.cookies)
-
-        if 'Unusual activity' in r.text:
-            Log.Error('IP flagged by ChatGPT')
-            raise SystemExit(r.status_code)
+        self._run_conversation(messages)
 
         self.data['conversation_id'] = conversation_id
         self.conversation_id = conversation_id
-        self.response = self._parse_event_stream(r.text)
