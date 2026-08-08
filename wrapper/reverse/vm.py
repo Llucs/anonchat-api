@@ -1,5 +1,5 @@
-from json        import dumps, loads
-from base64      import b64decode, b64encode
+from json        import dumps
+from base64      import b64encode
 from random      import randint, random
 from .decompiler import Decompiler
 from .parse      import Parser
@@ -32,8 +32,8 @@ class VM:
         for key, value in keys.items():
             try:
                 value = float(value)
-            except:
-                ...
+            except (TypeError, ValueError):
+                pass
 
             if isinstance(value, float):
                 payload[key] = b64encode(VM.xor(str(value), xor_key).encode("utf-8")).decode("utf-8")
@@ -42,10 +42,12 @@ class VM:
                 payload[key] = b64encode(value.split("singlebtoa(")[1].split(")")[0].encode("utf-8")).decode("utf-8")
 
             elif "doublexor" in value:
+                # JS: XOR_STR(XOR_STR(x, key), key); the old code XORed the
+                # number with itself, producing 0-bytes only (garbage).
                 number: str = value.split("doublexor(")[1].split(")")[0]
-                value_1: str = b64encode(VM.xor(number, number).encode("utf-8")).decode("utf-8")
-                value_2: str = b64encode(VM.xor(value_1, value_1).encode("utf-8")).decode("utf-8")
-                payload[key] = b64encode(value_2.encode("utf-8")).decode("utf-8")
+                once: str = VM.xor(number, xor_key)
+                twice: str = VM.xor(once, xor_key)
+                payload[key] = b64encode(twice.encode('utf-8')).decode('utf-8')
 
             elif "ipinfo" in value:
                 payload[key] = b64encode(VM.xor(ip_info, xor_key).encode("utf-8")).decode("utf-8")
@@ -59,7 +61,7 @@ class VM:
 
             elif "random_1" in value:
                 random_value: float = random()
-                payload[key] = b64encode(VM.xor(str(random_value), str(random_value)).encode("utf-8")).decode("utf-8")
+                payload[key] = b64encode(VM.xor(str(random_value), xor_key).encode("utf-8")).decode("utf-8")
 
             elif "random_2" in value:
                 payload[key] = random()

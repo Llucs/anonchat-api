@@ -4,8 +4,8 @@ import base64
 
 
 class Decompiler:
-    
-    
+
+
     mapping: dict = {
         "1": "XOR_STR",
         "2": "SET_VALUE",
@@ -81,7 +81,7 @@ class Decompiler:
                 var_name = str(args[1]).replace(".", "_")
                 Decompiler.decompiled += f"var var_{var_name} = window;\n"
                 Decompiler.array_dict[args[1]] = "window"
-        
+
         elif operation == "SET_VALUE":
             var_name = str(args[0]).replace(".", "_")
             value = args[1]
@@ -98,11 +98,11 @@ class Decompiler:
                     if value == "[]":
                         Decompiler.decompiled += f"var var_{var_name} = [];\n"
                         Decompiler.array_dict[args[0]] = []
-                    
+
                     elif value == "None":
                         Decompiler.decompiled += f"var var_{var_name} = null;\n"
                         Decompiler.array_dict[args[0]] = "null"
-                        
+
                     else:
                         Decompiler.decompiled += f"var var_{var_name} = \"{value}\";\n"
                         Decompiler.array_dict[args[0]] = f"\"{value}\""
@@ -115,36 +115,36 @@ class Decompiler:
                 else:
                     Decompiler.decompiled += f"var var_{var_name} = {value};\n"
                     Decompiler.array_dict[args[0]] = str(value)
-        
+
         elif operation == "ARRAY_ACCESS":
             Decompiler.handle_array_access(args)
-        
+
         elif operation == "BIND_METHOD":
             Decompiler.handle_bind_method(args)
-        
+
         elif operation == "XOR_STR":
             if Decompiler.round1 == 1 and len(Decompiler.potential) < 2:
                 Decompiler.potential.append({"var": args[0], "key": args[1]})
             var_name = str(args[0]).replace(".", "_")
             key_name = str(args[1]).replace(".", "_")
             Decompiler.decompiled += f"var var_{var_name} = XOR_STR(var_{var_name}, var_{key_name});\n"
-        
+
         elif operation == "BTOA_3":
             var_name = str(args[0]).replace(".", "_")
             Decompiler.decompiled += f"var var_{var_name} = btoa(\"\" + var_{var_name});\n"
-        
+
         elif operation == "CALL_AND_SET":
             var_name = str(args[0]).replace(".", "_")
             func_name = str(args[1]).replace(".", "_")
             args_str = ", ".join(f"var_{arg.replace('.', '_')}" for arg in args[2:])
             Decompiler.decompiled += f"var var_{var_name} = var_{func_name}({args_str});\n"
-        
+
         elif operation == "IF_DEFINED_CALL":
             Decompiler.handle_if_defined_call(args)
-        
+
         elif operation == "CALL":
             Decompiler.handle_call_operation(args)
-        
+
         elif operation == "ADD_OR_PUSH":
             var_name = str(args[0]).replace(".", "_")
             arg_name = str(args[1]).replace(".", "_")
@@ -152,7 +152,7 @@ class Decompiler:
                 f"var var_{var_name} = Array.isArray(var_{var_name}) ? "
                 f"(var_{var_name}.push(var_{arg_name}), var_{var_name}) : var_{var_name} + var_{arg_name};\n"
             )
-        
+
         elif operation == "IF_DIFF_CALL":
             var_0 = str(args[0]).replace(".", "_")
             var_1 = str(args[1]).replace(".", "_")
@@ -168,17 +168,17 @@ class Decompiler:
                 Decompiler.decompiled += (
                     f"Math.abs(var_{var_0} - var_{var_1}) > var_{var_2} ? {Decompiler.mapping[args[3]]}({args_str}) : null;\n"
                 )
-        
+
         elif operation == "TRY_CALL":
             Decompiler.handle_try_call(args)
-        
+
         elif operation == "JSON_STRINGIFY":
             var_name = str(args[0]).replace(".", "_")
             Decompiler.decompiled += f"var var_{var_name} = JSON.stringify(var_{var_name});\n"
-            
+
         elif operation == "MOVE":
             Decompiler.decompiled += f"MOVE {args}" # not even used lmfao
-        
+
         else:
             mapped = [Decompiler.mapping[key] for key in args[1:] if key in Decompiler.mapping]
             unlabeled = [str(key) for key in args[1:] if key not in Decompiler.mapping]
@@ -267,7 +267,7 @@ class Decompiler:
             None if key is None else ([k for k, v in Decompiler.mapping.items() if v == Decompiler.mapping[key] and k != key] or [None])[0]
             for key in result
         ]
-        
+
         if len(args) == 4:
             target = str(args[3]).replace(".", "_")
             count = len(re.findall(re.escape(target), Decompiler.decompiled))
@@ -386,12 +386,12 @@ class Decompiler:
             t = [str(item) for item in bytecode[0][1:]]
             bytecode.pop(0)
             Decompiler.vg += 1
-            
+
             if e in Decompiler.mapping:
                 Decompiler.handle_operation(Decompiler.mapping[e], t)
             else:
                 Decompiler.decompiled += f"// UNKNOWN_OPCODE {e} -> {', '.join(t)};\n"
-            
+
             if Decompiler.mapping.get(e) == "CALL" and not Decompiler.found:
                 for entry in Decompiler.potential:
                     if len(t) > 3 and entry["var"] == t[3]:
@@ -414,7 +414,7 @@ class Decompiler:
         if bytecode:
             decoded = json.loads(Decompiler.xS(base64.b64decode(bytecode).decode(), str(Decompiler.xorkey)))
             Decompiler.decompile(decoded)
-        
+
         if Decompiler.round1 == 1:
             Decompiler.round1 += 1
             Decompiler.decompile_3()
@@ -439,5 +439,5 @@ class Decompiler:
         )
         Decompiler.decompile(json.loads(Decompiler.xS(base64.b64decode(turnstile).decode(), str(token))))
         return Decompiler.decompiled
-    
+
 # NOTE dont mind this please i converted my JS decompiler to py using AI dont judge this please

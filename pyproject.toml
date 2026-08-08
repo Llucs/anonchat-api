@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "W", "C4", "UP"]
+
+# E501 (linhas >120) nos geradores de código do wrapper/reverse: o conteúdo
+# são strings de código JS/bytecode embutidos, cuja quebra mecânica não
+# melhora legibilidade nem comportamento. Mantidos intactos.
+[tool.ruff.lint.per-file-ignores]
+"wrapper/reverse/*.py" = ["E501", "E722"]

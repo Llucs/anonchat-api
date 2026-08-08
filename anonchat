@@ -5,16 +5,7 @@ from time import time
 from uuid import uuid4
 
 from engine.session import ChatGPT
-from engine.response import build_chat_response, build_stream_chunk, _count
-
-try:
-    import tiktoken
-    _enc = tiktoken.get_encoding('o200k_base')
-    def _count(s):
-        return len(_enc.encode(s)) if s else 0
-except ImportError:
-    def _count(s):
-        return max(1, len(s) // 4)
+from engine.response import build_model_list, build_chat_response, build_stream_chunk
 
 
 def main():
@@ -45,28 +36,7 @@ def main():
     if args.list_models:
         client = ChatGPT(proxy=args.proxy) if args.proxy else ChatGPT()
         models = client.list_models()
-        def _build(m):
-            pf = m.get('product_features', {})
-            att = pf.get('attachments', {})
-            return {
-                'id': m['slug'],
-                'name': m.get('title', ''),
-                'object': 'model',
-                'owned_by': 'openai',
-                'info': {
-                    'name': m.get('title', ''),
-                    'description': m.get('description', ''),
-                    'max_tokens': m.get('max_tokens', 0),
-                    'abilities': {
-                        'vision': 1 if att.get('image_mime_types') else 0,
-                        'document': 1 if att.get('accepted_mime_types') else 0,
-                        'thinking': 1 if m.get('reasoning_type') not in (None, 'none') else 0,
-                    },
-                    'tools': m.get('enabled_tools', []),
-                    'tags': m.get('tags', []),
-                },
-            }
-        print(_json.dumps({'object': 'list', 'data': [_build(m) for m in models]}, indent=2))
+        print(_json.dumps(build_model_list(models), indent=2))
         return
 
     if args.message:

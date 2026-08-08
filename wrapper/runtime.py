@@ -1,4 +1,5 @@
-from typing    import Callable, Any, Optional, Type
+from typing    import Any
+from collections.abc import Callable
 from .logger   import Log
 from functools import wraps
 
@@ -25,8 +26,8 @@ class Utils:
 
     @staticmethod
     def between(
-        main_text: Optional[str],
-        value_1: Optional[str],
-        value_2: Optional[str],
-        ) -> Type[str]:
+        main_text: str | None,
+        value_1: str | None,
+        value_2: str | None,
+        ) -> str | None:
         return main_text.split(value_1)[1].split(value_2)[0]

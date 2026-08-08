@@ -14,9 +14,9 @@ class Parser:
         var_defs = {}
 
         def collect_var_defs(node, var_defs):
-            if (node.type == 'VariableDeclarator' and 
-                hasattr(node, 'id') and node.id and 
-                hasattr(node, 'init') and node.init and 
+            if (node.type == 'VariableDeclarator' and
+                hasattr(node, 'id') and node.id and
+                hasattr(node, 'init') and node.init and
                 hasattr(node, 'loc') and node.loc):
                 id_name = node.id.name if hasattr(node.id, 'name') else None
                 if not id_name:
@@ -87,22 +87,22 @@ class Parser:
                     vars_set = set()
 
                     def collect_identifiers(node):
-                        if (hasattr(node, 'type') and node.type == 'Identifier' and 
+                        if (hasattr(node, 'type') and node.type == 'Identifier' and
                             hasattr(node, 'name')):
                             parent = getattr(node, '_parent', None)
                             if parent:
                                 parent_type = parent.type if hasattr(parent, 'type') else None
-                                if ((parent_type == 'MemberExpression' and 
-                                    hasattr(parent, 'property') and parent.property == node and 
+                                if ((parent_type == 'MemberExpression' and
+                                    hasattr(parent, 'property') and parent.property == node and
                                     not (hasattr(parent, 'computed') and parent.computed)) or
-                                    (parent_type == 'ObjectProperty' and 
-                                    hasattr(parent, 'key') and parent.key == node and 
+                                    (parent_type == 'ObjectProperty' and
+                                    hasattr(parent, 'key') and parent.key == node and
                                     not (hasattr(parent, 'computed') and parent.computed)) or
-                                    (parent_type == 'VariableDeclarator' and 
+                                    (parent_type == 'VariableDeclarator' and
                                     hasattr(parent, 'id') and parent.id == node) or
-                                    (parent_type == 'FunctionDeclaration' and 
+                                    (parent_type == 'FunctionDeclaration' and
                                     hasattr(parent, 'id') and parent.id == node) or
-                                    (parent_type == 'FunctionExpression' and 
+                                    (parent_type == 'FunctionExpression' and
                                     hasattr(parent, 'id') and parent.id == node) or
                                     node.name == 'window'):
                                     return
@@ -262,9 +262,9 @@ class Parser:
             return assignments
     @staticmethod
     def get_xor_key(js_code: str):
-        
+
         parsed = esprima.parseScript(js_code, tolerant=True)
-        
+
         last_xor_call = None
         second_arg_node = None
 
@@ -300,13 +300,13 @@ class Parser:
             return None
 
         return find_value(parsed.body, var_name)
-    
+
     @staticmethod
     def parse_keys(decompiled_code: str) -> tuple[str, dict]:
-        
+
         assignments: dict = Parser.parse_assigments(decompiled_code)
         xor_key: str = Parser.get_xor_key(decompiled_code)
-        
+
         parsed_keys: dict = {}
         randomindex = 1
         for key, value in assignments.items():
@@ -339,5 +339,5 @@ class Parser:
                 parsed_keys[key] = value
 
         return xor_key, parsed_keys
-    
+
 # NOTE dont mind this please i converted my babel parser from JS to py using AI i know its shit but i didnt wanna exec js code or smt
