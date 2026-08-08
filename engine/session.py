@@ -209,16 +209,14 @@ class ChatGPT(_BaseChatGPT):
         return _clean_markers(assem.text())
 
     def _extract_reasoning(self, text: str):
-        reasoning_text = ''
-        if '  ' in text:
-            end = text.find('  ')
-            if end >= 3:
-                reasoning_text = text[3:end]
-                text = text[end + 3:]
-            else:
-                reasoning_text = text[:end]
-                text = text[end + 2:]
-        return text, reasoning_text
+        # The anonymous guest backend never separates a reasoning block from
+        # the final answer in the SSE it emits (probed live: a single
+        # assistant stream, did_auto_switch_to_reasoning=false). The old
+        # heuristic split on the first double space, which lands inside the
+        # indentation of markdown code blocks and tears replies in half.
+        # Without a real delimiter there is nothing to extract, so the full
+        # text is content.
+        return text, ''
 
     def converse(self, message: str, image: str = None,
                  conversation_id: str = None, parent_message_id: str = None,
